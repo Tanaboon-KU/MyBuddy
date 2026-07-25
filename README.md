@@ -45,9 +45,9 @@ This repository contains the Flutter application and the local Flutter packages 
 
 MyBuddy is part of a multi-repository product surface:
 
-- **Flutter app**: https://github.com/newnonsick/MyBuddy
-- **Unity avatar runtime**: https://github.com/newnonsick/MyBuddy-Unity
-- **Model catalog admin panel**: https://github.com/newnonsick/MyBuddy-Admin-Panel
+- **Flutter app**: [https://github.com/newnonsick/MyBuddy](https://github.com/Tanaboon-KU/MyBuddy)
+- **Unity avatar runtime**: [https://github.com/newnonsick/MyBuddy-Unity](https://github.com/Tanaboon-KU/MyBuddy-Unity)
+- **Model catalog admin panel**: [https://github.com/newnonsick/MyBuddy-Admin-Panel](https://github.com/Tanaboon-KU/MyBuddy-Admin-Panel)
 
 The app consumes the Unity export as an Android library and fetches LLM and STT catalogs from the admin panel API at runtime.
 
