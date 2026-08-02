@@ -9,6 +9,12 @@ abstract class AssistantRuntimeController extends ChangeNotifier {
   List<Map<String, String>> get conversation;
 
   Future<String> chatOnce(String userText);
+
+  /// Discards the current conversation and starts a fresh one.
+  ///
+  /// Does not touch persisted memory and does not reload the model.
+  Future<void> startNewConversation();
+
   Future<void> activateSelectedModel();
   void beginTranscribing();
   void endTranscribing();

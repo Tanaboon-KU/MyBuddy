@@ -9,12 +9,18 @@ class MemoryEditorSheet extends StatefulWidget {
     required this.initialAutoUpdate,
     required this.initialLockedFields,
     required this.memoryService,
+    this.onResetToColdStart,
   });
 
   final UserMemory initialMemory;
   final bool initialAutoUpdate;
   final Set<String> initialLockedFields;
   final MemoryService memoryService;
+
+  /// Wipes stored memory and the live conversation together. Supplied by the
+  /// host page, which owns the `AppController` needed to clear the session.
+  /// When null the reset control is hidden.
+  final Future<void> Function()? onResetToColdStart;
 
   @override
   State<MemoryEditorSheet> createState() => _MemoryEditorSheetState();
@@ -434,11 +440,69 @@ class _MemoryEditorSheetState extends State<MemoryEditorSheet> {
             color: Colors.redAccent.withValues(alpha: 0.8),
             size: 20,
           ),
-          tooltip: 'Clear all memory',
+          tooltip: 'Clear all fields (still needs Save)',
           onPressed: _clearAll,
         ),
+        if (widget.onResetToColdStart != null)
+          IconButton(
+            icon: Icon(
+              Icons.restart_alt_rounded,
+              color: Colors.redAccent.withValues(alpha: 0.8),
+              size: 20,
+            ),
+            tooltip: 'Reset to cold start',
+            onPressed: _saving ? null : _resetToColdStart,
+          ),
       ],
     );
+  }
+
+  /// Full cold start: wipes every stored key *and* the live conversation.
+  ///
+  /// Distinct from [_clearAll], which only empties the on-screen fields and
+  /// leaves the consent flag, the locked-field sets and the current
+  /// conversation untouched until Save is pressed.
+  Future<void> _resetToColdStart() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset to cold start?'),
+        content: const Text(
+          'Wipes all three memory layers, the auto-update consent flag and '
+          'every locked field, then starts a new conversation.\n\n'
+          'Downloaded models are not affected. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _saving = true);
+    try {
+      await widget.onResetToColdStart!();
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reset failed: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildSectionCard({

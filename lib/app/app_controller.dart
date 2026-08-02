@@ -324,6 +324,46 @@ class AppController extends AssistantRuntimeController {
     }
   }
 
+  @override
+  Future<void> startNewConversation() async {
+    if (generatingResponse) {
+      throw StateError(
+        'Assistant is still generating a response. Please wait.',
+      );
+    }
+
+    // A pending extraction is dropped, not flushed. Log it loudly: silently
+    // losing the last turns is exactly the failure mode the experiment
+    // protocol needs to be able to see.
+    if (_memoryIdleTimer?.isActive ?? false) {
+      debugPrint(
+        'AppController.startNewConversation: cancelling a pending memory '
+        'extraction ($_turnsSinceMemoryUpdate turn(s) since the last update '
+        'will NOT be written to memory)',
+      );
+    }
+    _memoryIdleTimer?.cancel();
+    _memoryIdleTimer = null;
+    _turnsSinceMemoryUpdate = 0;
+
+    _conversation.clear();
+    notifyListeners();
+
+    await llm.startNewConversation();
+    notifyListeners();
+  }
+
+  /// Wipes persisted memory back to cold start *and* starts a new conversation.
+  ///
+  /// Both halves are required: clearing storage alone would leave the previous
+  /// turns in the live session, where they would be replayed into the next
+  /// prompt and fed to the extraction pass.
+  Future<void> resetMemoryToColdStart() async {
+    await memory.resetToColdStart();
+    await startNewConversation();
+    debugPrint('AppController.resetMemoryToColdStart: done');
+  }
+
   Future<void> _handleMemoryTurnProgress() async {
     _turnsSinceMemoryUpdate += 1;
 

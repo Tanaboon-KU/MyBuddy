@@ -688,6 +688,38 @@ class LlmService {
     lockedFields: lockedFields,
   );
 
+  /// Drops the current conversation and starts a fresh one.
+  ///
+  /// Clears [_canonicalDialogue] and disposes the active chat session so the
+  /// next [generateChat] rebuilds from an empty history. The loaded [_model] is
+  /// deliberately kept — reloading it would cost seconds and generate heat,
+  /// which would contaminate the timing measurements this method exists to
+  /// support.
+  ///
+  /// Persisted memory is untouched; see `MemoryService.resetToColdStart`.
+  Future<void> startNewConversation() async {
+    return _runExclusive(() async {
+      final discarded = _canonicalDialogue.length;
+      _canonicalDialogue.clear();
+      _systemFingerprint = null;
+
+      final chat = _chat;
+      _chat = null;
+      if (chat != null) {
+        try {
+          await chat.session.close();
+        } catch (e) {
+          debugPrint('LlmService.startNewConversation: session close failed: $e');
+        }
+      }
+
+      debugPrint(
+        'LlmService.startNewConversation: cleared $discarded message(s), '
+        'model kept loaded',
+      );
+    });
+  }
+
   Future<void> close() async {
     return _runExclusive(() async {
       final model = _model;

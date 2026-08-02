@@ -83,5 +83,7 @@ final class _FakeRuntime extends AssistantRuntimeController {
   @override
   Future<String> chatOnce(String userText) => Future<String>.error(error);
   @override
+  Future<void> startNewConversation() async {}
+  @override
   void endTranscribing() {}
 }

@@ -19,6 +19,26 @@ abstract final class MemoryStorageKeys {
   static const String lockedSoulFields = 'mybuddy.memory.locked_soul_fields.v1';
   static const String lockedIdentityFields =
       'mybuddy.memory.locked_identity_fields.v1';
+
+  /// Every key that holds memory state.
+  ///
+  /// [legacyMemory] must stay in this set: [MemoryService.loadMemoryData]
+  /// falls back to it and re-migrates, so leaving it behind makes a "cold
+  /// start" silently restore old data on the next load.
+  ///
+  /// Model and STT installation keys are intentionally absent — resetting
+  /// memory must never delete a downloaded model.
+  static const Set<String> all = <String>{
+    memory,
+    soulMemory,
+    identityMemory,
+    userMemory,
+    legacyMemory,
+    allowAutoUpdate,
+    lockedFields,
+    lockedSoulFields,
+    lockedIdentityFields,
+  };
 }
 
 abstract final class MemoryFieldPaths {
@@ -677,6 +697,32 @@ class MemoryService {
       await _saveMemoryDataToPrefs(
         prefs,
         UserMemory(user: UserProfileMemory(facts: [trimmed])),
+      );
+    });
+  }
+
+  /// Wipes every persisted memory key so the next load returns a cold-start
+  /// [UserMemory].
+  ///
+  /// Clears all three layers, the `allowAutoUpdate` consent flag, every locked
+  /// field set, and the legacy v2 blob. Downloaded models are untouched.
+  ///
+  /// This resets *storage only*. The in-flight conversation lives in
+  /// `LlmService`; call `LlmService.startNewConversation` as well for a true
+  /// cold start.
+  Future<void> resetToColdStart() {
+    return _runSequential(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final removed = <String>[];
+      for (final key in MemoryStorageKeys.all) {
+        if (prefs.containsKey(key)) {
+          await prefs.remove(key);
+          removed.add(key);
+        }
+      }
+      debugPrint(
+        'MemoryService.resetToColdStart: removed ${removed.length} key(s) '
+        '${removed.isEmpty ? '' : '- ${removed.join(', ')}'}',
       );
     });
   }
