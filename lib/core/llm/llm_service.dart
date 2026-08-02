@@ -85,6 +85,22 @@ class LlmService {
   String? _systemFingerprint;
   final List<Message> _canonicalDialogue = <Message>[];
 
+  String? _lastComposedSystemText;
+
+  /// The exact system instruction most recently handed to the model.
+  ///
+  /// This is the post-[_composeSystemText] string — memory block *plus* the
+  /// `<tool_rules>` and `<tools>` blocks. `MemoryService.buildSystemPrompt`
+  /// alone returns only the memory block, which is roughly a third of what the
+  /// model actually receives, so instrumentation must read this instead.
+  ///
+  /// Null until the first [generateChat]; survives [startNewConversation] so a
+  /// dump taken right after a turn still reports that turn's prompt.
+  String? get lastComposedSystemText => _lastComposedSystemText;
+
+  /// Character count of [lastComposedSystemText]; 0 before the first turn.
+  int get lastComposedSystemChars => _lastComposedSystemText?.length ?? 0;
+
   Future<T> _runExclusive<T>(Future<T> Function() action) {
     if (Zone.current[_exclusiveZoneKey] == true) {
       return action();
@@ -380,6 +396,7 @@ class LlmService {
         systemText ?? '',
         toolsInstruction,
       );
+      _lastComposedSystemText = composedSystemText;
 
       final needsRebuild =
           _chat == null || _systemFingerprint != composedSystemText;

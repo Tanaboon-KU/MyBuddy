@@ -70,6 +70,12 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
 
+  # Needed to mock PathProviderPlatform in the experiment-dump tests. Pinned to
+  # the versions already resolved transitively so adding them cannot move the
+  # lock file - the experiment protocol requires one fixed build per run.
+  path_provider_platform_interface: 2.1.2
+  plugin_platform_interface: 2.1.8
+
 flutter_icons:
   android: true
   ios: true
