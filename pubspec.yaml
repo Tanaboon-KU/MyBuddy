@@ -65,6 +65,10 @@ dependencies:
 
   toastification: ^3.0.3
 
+  # sys_prompt_sha256 in the per-turn log (protocol section 1b). Pinned to the
+  # version already resolved transitively so it cannot move the lock file.
+  crypto: 3.0.7
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

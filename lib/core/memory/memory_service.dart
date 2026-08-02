@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../diagnostics/turn_log.dart';
 import '../llm/llm_service.dart';
 import '../llm/memory_tool_semantics.dart';
 
@@ -1259,28 +1260,109 @@ class MemoryService {
     return compute(_buildSystemPrompt, memory.toJsonString());
   }
 
-  Future<void> updateMemoryFromChat({required LlmService llm}) async {
+  /// Runs one extraction pass and reports exactly how it ended.
+  ///
+  /// Previously returned void and logged only on hard failure, so the three
+  /// distinct ways to change nothing — model said `{"updates":[]}`, every patch
+  /// was rejected, the pass timed out — were indistinguishable from success.
+  /// A rejected pass in particular counted as success because `noEffect` is not
+  /// `failure`. See ROOT_CAUSE_ANALYSIS.md sections 2 and 7.5; the returned
+  /// [MemoryExtractionOutcome] fills `extract_parse_result`,
+  /// `extract_raw_output`, `memory_changed` and `layers_changed`.
+  Future<MemoryExtractionOutcome> updateMemoryFromChat({
+    required LlmService llm,
+  }) async {
+    final before = await loadMemoryData();
+
+    String rawResponse;
     try {
-      final current = await loadMemoryData();
-      final currentJson = current.toJsonString();
-      final lockedFields = await loadLockedFields();
-
-      final rawResponse = await llm.extractMemoryFromChat(
-        currentJson,
-        lockedFields: lockedFields,
+      rawResponse = await llm.extractMemoryFromChat(
+        before.toJsonString(),
+        lockedFields: await loadLockedFields(),
       );
-      if (rawResponse.trim().isEmpty) return;
-
-      final patches = _parseExtractedMemoryPatches(rawResponse);
-      final result = await applyMemoryPatches(patches);
-      if (!result.success) {
-        debugPrint(
-          'MemoryService: Memory patch update failed: ${result.message}',
-        );
-      }
+    } on MemoryExtractionTimeoutException catch (e) {
+      debugPrint('MemoryService: extraction timed out: $e');
+      return const MemoryExtractionOutcome(
+        parseResult: ExtractionParseResult.timedOut,
+      );
     } catch (e) {
-      debugPrint('MemoryService: Failed to update memory: $e');
+      debugPrint('MemoryService: extraction call failed: $e');
+      return MemoryExtractionOutcome(
+        parseResult: ExtractionParseResult.failed,
+        rawOutput: 'exception: $e',
+      );
     }
+
+    if (rawResponse.trim().isEmpty) {
+      debugPrint('MemoryService: extraction returned an empty response');
+      return const MemoryExtractionOutcome(
+        parseResult: ExtractionParseResult.failed,
+        rawOutput: '',
+      );
+    }
+
+    final decoded = _decodeExtractedJsonMap(rawResponse);
+    final updates = decoded?['updates'];
+    if (decoded == null || updates is! List) {
+      debugPrint(
+        'MemoryService: extraction output had no usable "updates" array',
+      );
+      return MemoryExtractionOutcome(
+        parseResult: ExtractionParseResult.failed,
+        rawOutput: rawResponse,
+      );
+    }
+
+    if (updates.isEmpty) {
+      return MemoryExtractionOutcome(
+        parseResult: ExtractionParseResult.noChange,
+        rawOutput: rawResponse,
+      );
+    }
+
+    final patches = _parseExtractedMemoryPatches(rawResponse);
+    final result = await applyMemoryPatches(patches);
+    final rejectionCodes = result.rejections
+        .map((r) => '${r.section}.${r.field}:${r.code.name}')
+        .toList(growable: false);
+
+    if (result.appliedCount == 0) {
+      // The failure mode RC-2 predicts. Loud, because the old code path was
+      // completely silent here.
+      debugPrint(
+        'MemoryService: extraction produced ${patches.length} patch(es) but '
+        'applied 0 - rejections: ${rejectionCodes.join(', ')}',
+      );
+      return MemoryExtractionOutcome(
+        parseResult: ExtractionParseResult.rejected,
+        rawOutput: rawResponse,
+        rejectionCodes: rejectionCodes,
+      );
+    }
+
+    final after = await loadMemoryData();
+    return MemoryExtractionOutcome(
+      parseResult: ExtractionParseResult.valid,
+      rawOutput: rejectionCodes.isEmpty ? null : rawResponse,
+      memoryChanged: true,
+      layersChanged: _changedLayers(before, after),
+      rejectionCodes: rejectionCodes,
+    );
+  }
+
+  static List<String> _changedLayers(UserMemory before, UserMemory after) {
+    final changed = <String>[];
+    if (jsonEncode(before.soul.toJson()) != jsonEncode(after.soul.toJson())) {
+      changed.add('soul');
+    }
+    if (jsonEncode(before.identity.toJson()) !=
+        jsonEncode(after.identity.toJson())) {
+      changed.add('identity');
+    }
+    if (jsonEncode(before.user.toJson()) != jsonEncode(after.user.toJson())) {
+      changed.add('user');
+    }
+    return changed;
   }
 
   Future<MemoryUpdateResult> updateSoulMemoryFromChat({

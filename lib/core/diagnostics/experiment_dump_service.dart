@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../llm/llm_service.dart';
 import '../memory/memory_service.dart';
+import 'turn_log_recorder.dart';
 
 /// Writes the artefacts the experiment protocol in `my-tasks/` asks for:
 /// a memory dump and the exact composed system prompt, both as files that can
@@ -24,6 +25,7 @@ class ExperimentDumpService {
   static const String rootFolderName = 'mybuddy-experiments';
   static const String memoryFolderName = 'memory_dumps';
   static const String promptFolderName = 'prompts';
+  static const String timingFolderName = 'timing';
 
   /// Where dumps land.
   ///
@@ -94,6 +96,30 @@ class ExperimentDumpService {
     debugPrint(
       'ExperimentDumpService: prompt dump -> ${file.path} '
       '(${prompt.length} chars)',
+    );
+    return file;
+  }
+
+  /// Writes the per-turn log as CSV (protocol section 1b).
+  ///
+  /// Lands in `timing/` to match the folder layout in section 0. Exporting an
+  /// empty log still writes the header row, so an exported file is never
+  /// ambiguous about which columns it holds.
+  Future<File> exportTurnLog(
+    TurnLogRecorder recorder, {
+    String? label,
+  }) async {
+    final content = recorder.toCsv();
+    final file = await _fileFor(
+      folder: timingFolderName,
+      label: label,
+      fallbackPrefix: 'turn_log',
+      extension: 'csv',
+    );
+    await file.writeAsString(content, flush: true);
+    debugPrint(
+      'ExperimentDumpService: turn log -> ${file.path} '
+      '(${recorder.length} row(s), ${recorder.droppedEntries} dropped)',
     );
     return file;
   }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../app/app_controller.dart';
 import '../../../../app/providers.dart';
 
 /// Operator surface for the E1/E2/E3 protocol in `my-tasks/`.
@@ -81,6 +82,23 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     return 'Prompt written to ${_basename(file.path)} ($chars chars)';
   });
 
+  Future<void> _exportTurnLog() => _run('Turn log export', () async {
+    final app = ref.read(appControllerProvider);
+    final file = await ref
+        .read(experimentDumpServiceProvider)
+        .exportTurnLog(app.turnLog, label: _label.isEmpty ? null : _label);
+    final dropped = app.turnLog.droppedEntries;
+    return 'Wrote ${app.turnLog.length} row(s) to ${_basename(file.path)}'
+        '${dropped > 0 ? ' — WARNING: $dropped older row(s) were dropped' : ''}';
+  });
+
+  Future<void> _forceExtraction() => _run('Force extraction', () async {
+    final app = ref.read(appControllerProvider);
+    await app.forceExtractionNow();
+    final result = app.lastExtractionResult;
+    return 'Extraction finished: ${result?.csvValue ?? 'no result'}';
+  });
+
   Future<void> _newConversation() => _run('New conversation', () async {
     final app = ref.read(appControllerProvider);
     final discarded = app.conversation.length;
@@ -121,8 +139,80 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
 
   static String _basename(String path) => path.split(RegExp(r'[\\/]')).last;
 
+  /// The extraction-complete signal protocol section 1a item 6 requires.
+  ///
+  /// Shows the countdown too: with the current debounce a turn waits a full
+  /// minute before anything is written, and the RA needs to see that rather
+  /// than guess.
+  Widget _buildExtractionStatus(AppController app) {
+    final phase = app.extractionPhase;
+    final (color, label) = switch (phase) {
+      ExtractionPhase.idle => (Colors.white38, 'Idle'),
+      ExtractionPhase.scheduled => (Colors.amberAccent, 'Scheduled'),
+      ExtractionPhase.running => (Colors.lightBlueAccent, 'Running'),
+      ExtractionPhase.complete => (Colors.greenAccent, 'Complete'),
+    };
+
+    final details = <String>[];
+    final scheduledFor = app.extractionScheduledFor;
+    if (phase == ExtractionPhase.scheduled && scheduledFor != null) {
+      final remaining = scheduledFor.difference(DateTime.now());
+      details.add(
+        remaining.isNegative
+            ? 'due now'
+            : 'in ~${remaining.inSeconds}s',
+      );
+    }
+    final result = app.lastExtractionResult;
+    if (result != null) details.add(result.csvValue);
+    final completedAt = app.lastExtractionCompletedAt;
+    if (completedAt != null) {
+      String two(int v) => v.toString().padLeft(2, '0');
+      details.add(
+        'at ${two(completedAt.hour)}:${two(completedAt.minute)}:'
+        '${two(completedAt.second)}',
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.circle, size: 10, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Extraction: $label',
+                  style: TextStyle(color: color, fontSize: 13),
+                ),
+                if (details.isNotEmpty)
+                  Text(
+                    details.join(' · '),
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final app = ref.watch(appControllerProvider);
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
 
     return Padding(
@@ -158,6 +248,20 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
                 label: 'Dump system prompt',
                 subtitle: 'Exact text sent to the model, tool blocks included',
                 onPressed: _dumpPrompt,
+              ),
+              _buildAction(
+                icon: Icons.table_chart_outlined,
+                label: 'Export per-turn log (CSV)',
+                subtitle: '${app.turnLog.length} row(s) recorded',
+                onPressed: _exportTurnLog,
+              ),
+              const Divider(height: 28),
+              _buildExtractionStatus(app),
+              _buildAction(
+                icon: Icons.bolt_outlined,
+                label: 'Force extraction now',
+                subtitle: 'Skips the debounce · flagged in the log',
+                onPressed: _forceExtraction,
               ),
               const Divider(height: 28),
               _buildAction(

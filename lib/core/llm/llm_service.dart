@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 
+import '../diagnostics/turn_log.dart';
 import '../google/calendar_event_gateway.dart';
 import '../memory/memory_service.dart';
 import '../unity/unity_bridge.dart';
@@ -100,6 +101,15 @@ class LlmService {
 
   /// Character count of [lastComposedSystemText]; 0 before the first turn.
   int get lastComposedSystemChars => _lastComposedSystemText?.length ?? 0;
+
+  ChatGenerationTelemetry? _lastGenerationTelemetry;
+
+  /// Per-turn measurements from the most recent [generateChat].
+  ///
+  /// Feeds the timing and prompt columns of the log required by protocol
+  /// section 1b. Null until the first turn completes.
+  ChatGenerationTelemetry? get lastGenerationTelemetry =>
+      _lastGenerationTelemetry;
 
   Future<T> _runExclusive<T>(Future<T> Function() action) {
     if (Zone.current[_exclusiveZoneKey] == true) {
@@ -265,7 +275,14 @@ class LlmService {
     return '$base\n\n$toolsInstruction';
   }
 
+  /// Messages actually replayed by the last [_replayCanonicalDialogue].
+  ///
+  /// Lower than the stored history means older turns were dropped to fit the
+  /// budget — silently, before this counter existed.
+  int _lastReplayedMessageCount = 0;
+
   Future<void> _replayCanonicalDialogue(InferenceChat chat) async {
+    _lastReplayedMessageCount = 0;
     if (_canonicalDialogue.isEmpty) return;
 
     final systemInstruction = _systemFingerprint ?? '';
@@ -299,6 +316,14 @@ class LlmService {
     }
 
     final messagesToReplay = turnsToReplay.expand((t) => t).toList();
+    _lastReplayedMessageCount = messagesToReplay.length;
+    if (messagesToReplay.length < _canonicalDialogue.length) {
+      debugPrint(
+        'LlmService: replay dropped '
+        '${_canonicalDialogue.length - messagesToReplay.length} message(s) '
+        'to fit the token budget',
+      );
+    }
     await chat.clearHistory(replayHistory: messagesToReplay);
   }
 
@@ -398,6 +423,9 @@ class LlmService {
       );
       _lastComposedSystemText = composedSystemText;
 
+      final replyStartMs = DateTime.now().millisecondsSinceEpoch;
+      int? firstTokenMs;
+
       final needsRebuild =
           _chat == null || _systemFingerprint != composedSystemText;
       if (needsRebuild) {
@@ -464,10 +492,23 @@ class LlmService {
             chat: InferenceToolLoopChat(
               _chat!,
               generationTimeout: _chatGenerationTimeout,
+              onFirstToken: () {
+                firstTokenMs ??= DateTime.now().millisecondsSinceEpoch;
+              },
             ),
             collector: ModelTurnCollector(modelType: modelType),
             tools: toolSnapshot,
           ).run();
+
+          _lastGenerationTelemetry = ChatGenerationTelemetry(
+            replyStartMs: replyStartMs,
+            replyEndMs: DateTime.now().millisecondsSinceEpoch,
+            ttftMs: firstTokenMs == null ? null : firstTokenMs! - replyStartMs,
+            sysPromptChars: composedSystemText.length,
+            sysPromptSha256: TurnLogEntry.hashPrompt(composedSystemText),
+            sessionRebuilt: needsRebuild,
+            replayedMessageCount: needsRebuild ? _lastReplayedMessageCount : 0,
+          );
 
           _canonicalDialogue.add(canonicalUserMessage);
           _canonicalDialogue.add(Message.text(text: result, isUser: false));
@@ -551,10 +592,11 @@ class LlmService {
         }
         return _cleanResponse(responseBuffer.toString());
       } on TimeoutException {
-        debugPrint(
-          'LlmService: memory extraction timed out after 60s - returning empty.',
-        );
-        return '';
+        // Previously this returned '', which the caller could not tell apart
+        // from "the model had nothing to change". The protocol needs the two
+        // separated (extract_parse_result), so it now surfaces as an error.
+        debugPrint('LlmService: memory extraction timed out after 60s.');
+        throw const MemoryExtractionTimeoutException(Duration(seconds: 60));
       } finally {
         try {
           await session.close().timeout(const Duration(seconds: 5));
@@ -750,3 +792,79 @@ class LlmService {
 }
 
 enum _GenerationStage { preparing, queryAccepted, generating }
+
+/// Per-turn measurements captured during [LlmService.generateChat].
+///
+/// Supplies the timing and prompt columns of protocol section 1b.
+class ChatGenerationTelemetry {
+  const ChatGenerationTelemetry({
+    required this.replyStartMs,
+    required this.replyEndMs,
+    required this.ttftMs,
+    required this.sysPromptChars,
+    required this.sysPromptSha256,
+    required this.sessionRebuilt,
+    required this.replayedMessageCount,
+  });
+
+  final int replyStartMs;
+  final int replyEndMs;
+
+  /// Submit to first token. Null when the model produced no chunk — for
+  /// example a turn answered entirely from a tool result.
+  final int? ttftMs;
+
+  /// Length of the composed prompt: memory block plus the tool blocks.
+  final int sysPromptChars;
+  final String sysPromptSha256;
+
+  /// The chat session was torn down and rebuilt for this turn, discarding the
+  /// KV cache. Happens on the turn after memory changes.
+  final bool sessionRebuilt;
+
+  /// Messages replayed into the rebuilt session; 0 when no rebuild happened.
+  final int replayedMessageCount;
+
+  int get totalMs => replyEndMs - replyStartMs;
+}
+
+/// Thrown when the extraction pass exceeds its generation budget.
+///
+/// Exists so the caller can record `TIMED_OUT` rather than treating the empty
+/// result as "nothing to change" — the two used to be indistinguishable.
+class MemoryExtractionTimeoutException implements Exception {
+  const MemoryExtractionTimeoutException(this.budget);
+
+  final Duration budget;
+
+  @override
+  String toString() =>
+      'Memory extraction exceeded ${budget.inSeconds}s and was abandoned.';
+}
+
+/// Outcome of one extraction pass, for the write-path columns of section 1b.
+class MemoryExtractionOutcome {
+  const MemoryExtractionOutcome({
+    required this.parseResult,
+    this.rawOutput,
+    this.memoryChanged = false,
+    this.layersChanged = const <String>[],
+    this.rejectionCodes = const <String>[],
+  });
+
+  const MemoryExtractionOutcome.notRun()
+    : parseResult = ExtractionParseResult.notRun,
+      rawOutput = null,
+      memoryChanged = false,
+      layersChanged = const <String>[],
+      rejectionCodes = const <String>[];
+
+  final ExtractionParseResult parseResult;
+
+  /// Raw model output, kept whenever the pass did not cleanly apply a patch.
+  final String? rawOutput;
+
+  final bool memoryChanged;
+  final List<String> layersChanged;
+  final List<String> rejectionCodes;
+}
