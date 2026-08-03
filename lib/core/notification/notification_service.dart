@@ -81,9 +81,23 @@ class NotificationService extends ChangeNotifier {
       requestSoundPermission: true,
     );
 
+    // Every platform whose plugin implementation is compiled into the build
+    // must get settings, otherwise initialize() throws. The Windows
+    // implementation ships with flutter_local_notifications and is always
+    // compiled on desktop, so omitting it made the app die before runApp().
+    const windowsSettings = WindowsInitializationSettings(
+      appName: 'MyBuddy',
+      appUserModelId: 'com.example.mybuddy',
+      // Stable identifier for the activation callback. Must not change between
+      // releases or previously scheduled toasts stop routing back to the app.
+      guid: 'f2b0c1a4-6d3e-4a58-9c17-8e5b2d740af3',
+    );
+
     const initSettings = InitializationSettings(
       android: androidSettings,
       iOS: iosSettings,
+      macOS: iosSettings,
+      windows: windowsSettings,
     );
 
     await _notifications.initialize(
