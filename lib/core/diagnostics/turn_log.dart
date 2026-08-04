@@ -54,6 +54,7 @@ class TurnLogEntry {
     this.sysPromptSha256,
     this.sessionRebuilt,
     this.replayedMessageCount,
+    this.toolsExposed = const <String>[],
     this.extractStartMs,
     this.extractEndMs,
     this.extractParseResult = ExtractionParseResult.notRun,
@@ -93,6 +94,14 @@ class TurnLogEntry {
   /// How many messages were replayed into the rebuilt session. Lower than the
   /// stored history means turns were silently dropped to fit the budget.
   final int? replayedMessageCount;
+
+  /// Tools written into `<tools>` on this turn.
+  ///
+  /// Protocol §5.8 step 4 requires confirming the memory-update tools were not
+  /// exposed while consent is off. It also catches the calendar tool
+  /// appearing or vanishing with Google sign-in state, which moves the prompt
+  /// by 1,040 characters and invalidates a cross-run prompt comparison.
+  final List<String> toolsExposed;
 
   /// Reply finished and extraction was triggered.
   final int? extractStartMs;
@@ -135,6 +144,7 @@ class TurnLogEntry {
     String? sysPromptSha256,
     bool? sessionRebuilt,
     int? replayedMessageCount,
+    List<String>? toolsExposed,
     int? extractStartMs,
     int? extractEndMs,
     ExtractionParseResult? extractParseResult,
@@ -161,6 +171,7 @@ class TurnLogEntry {
       sysPromptSha256: sysPromptSha256 ?? this.sysPromptSha256,
       sessionRebuilt: sessionRebuilt ?? this.sessionRebuilt,
       replayedMessageCount: replayedMessageCount ?? this.replayedMessageCount,
+      toolsExposed: toolsExposed ?? this.toolsExposed,
       extractStartMs: extractStartMs ?? this.extractStartMs,
       extractEndMs: extractEndMs ?? this.extractEndMs,
       extractParseResult: extractParseResult ?? this.extractParseResult,
@@ -192,6 +203,7 @@ class TurnLogEntry {
     'sys_prompt_sha256',
     'session_rebuilt',
     'replayed_message_count',
+    'tools_exposed',
     'extract_start_ms',
     'extract_end_ms',
     'extract_total_ms',
@@ -222,6 +234,7 @@ class TurnLogEntry {
       sysPromptSha256,
       _boolValue(sessionRebuilt),
       replayedMessageCount,
+      toolsExposed.join('|'),
       extractStartMs,
       extractEndMs,
       extractTotalMs,

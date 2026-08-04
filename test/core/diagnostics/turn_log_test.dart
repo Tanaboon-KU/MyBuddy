@@ -224,4 +224,64 @@ void main() {
       expect(lines.first, TurnLogEntry.csvHeader);
     });
   });
+
+  group('tools_exposed', () {
+    test('is a column, positioned with the other prompt columns', () {
+      expect(TurnLogEntry.csvColumns, contains('tools_exposed'));
+      expect(
+        TurnLogEntry.csvColumns.indexOf('tools_exposed'),
+        TurnLogEntry.csvColumns.indexOf('replayed_message_count') + 1,
+      );
+    });
+
+    test('joins names with a pipe, like the other list columns', () {
+      const entry = TurnLogEntry(
+        sessionId: 's1',
+        turnIndex: 0,
+        timestampMs: 0,
+        inputText: 'hi',
+        replyText: 'hello',
+        toolsExposed: <String>['update_user_memory', 'create_calendar_event'],
+      );
+
+      expect(
+        entry.toCsvRow(),
+        contains('update_user_memory|create_calendar_event'),
+      );
+    });
+
+    test('is empty rather than absent when no tool was exposed', () {
+      // Protocol section 5.8 step 4 reads this to confirm the memory tools
+      // were withheld while consent is off. An absent column and a genuinely
+      // empty one have to stay distinguishable.
+      const entry = TurnLogEntry(
+        sessionId: 's1',
+        turnIndex: 0,
+        timestampMs: 0,
+        inputText: 'hi',
+        replyText: 'hello',
+      );
+
+      final cells = entry.toCsvRow().split(',');
+      final index = TurnLogEntry.csvColumns.indexOf('tools_exposed');
+      expect(cells[index], '');
+    });
+
+    test('survives copyWith when extraction fills the row in later', () {
+      const entry = TurnLogEntry(
+        sessionId: 's1',
+        turnIndex: 0,
+        timestampMs: 0,
+        inputText: 'hi',
+        replyText: 'hello',
+        toolsExposed: <String>['update_user_memory'],
+      );
+
+      final updated = entry.copyWith(
+        extractParseResult: ExtractionParseResult.noChange,
+      );
+
+      expect(updated.toolsExposed, <String>['update_user_memory']);
+    });
+  });
 }

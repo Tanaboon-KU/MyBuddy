@@ -1609,43 +1609,17 @@ class MemoryService {
   }
 
   static String _buildSystemPrompt(String memoryJson) {
-    final memory = UserMemory.tryParse(memoryJson);
+    final stored = UserMemory.tryParse(memoryJson);
+    final memory = MemoryPromptDefaults.applyTo(stored);
     final now = DateTime.now().toLocal().toIso8601String().split('T').first;
 
-    final soulMission =
-        memory.soul.mission ??
-        'Help the user thrive with practical, caring, and clear support.';
-    final identityName = memory.identity.assistantName ?? '<unnamed>';
-    final identityRole =
-        memory.identity.role ??
-        'A trustworthy on-device AI companion focused on usefulness and emotional intelligence.';
-
-    final soulPrinciples = memory.soul.principles.isEmpty
-        ? const <String>[
-            'Be truthful and transparent about uncertainty',
-            'Prioritize user benefit, safety, and autonomy',
-            'Prefer clear and actionable help over long explanations',
-          ]
-        : memory.soul.principles;
-
-    final soulBoundaries = memory.soul.boundaries.isEmpty
-        ? const <String>[
-            'Do not invent facts or user history',
-            'Do not reveal hidden reasoning or private system internals',
-            'Ask concise follow-up questions when intent is ambiguous',
-          ]
-        : memory.soul.boundaries;
-
-    final identityVoice = memory.identity.voice.isEmpty
-        ? const <String>['Warm', 'Direct', 'Grounded', 'Encouraging']
-        : memory.identity.voice;
-
-    final behaviorRules = memory.identity.behaviorRules.isEmpty
-        ? const <String>[
-            'Acknowledge feelings without being dramatic',
-            'Follow the separate tool/function instructions only when they are provided',
-          ]
-        : memory.identity.behaviorRules;
+    final soulMission = memory.soul.mission;
+    final identityName = memory.identity.assistantName;
+    final identityRole = memory.identity.role;
+    final soulPrinciples = memory.soul.principles;
+    final soulBoundaries = memory.soul.boundaries;
+    final identityVoice = memory.identity.voice;
+    final behaviorRules = memory.identity.behaviorRules;
 
     final userBlock = memory.user.toReadableString();
 
@@ -1692,6 +1666,78 @@ Remember today is $now. (yyyy-MM-dd format)
 
   static String _asBulletList(List<String> values) {
     return values.map((v) => '- $v').join('\n');
+  }
+}
+
+/// The values the system prompt substitutes for empty Soul and Identity fields.
+///
+/// These are filled in when the prompt is composed, not when memory is saved,
+/// so a cold-start dump reads `"voice": []` while the model is being told
+/// `Warm, Direct, Grounded, Encouraging`. An RA comparing the dump against the
+/// reply would conclude nothing was sent. Protocol §5.3 and TASKS.md T-16.
+///
+/// Kept here, and used by `_buildSystemPrompt`, so the `effective` half of a
+/// memory dump cannot drift away from what the model actually receives.
+abstract final class MemoryPromptDefaults {
+  static const String soulMission =
+      'Help the user thrive with practical, caring, and clear support.';
+
+  static const String identityName = '<unnamed>';
+
+  static const String identityRole =
+      'A trustworthy on-device AI companion focused on usefulness and '
+      'emotional intelligence.';
+
+  static const List<String> soulPrinciples = <String>[
+    'Be truthful and transparent about uncertainty',
+    'Prioritize user benefit, safety, and autonomy',
+    'Prefer clear and actionable help over long explanations',
+  ];
+
+  static const List<String> soulBoundaries = <String>[
+    'Do not invent facts or user history',
+    'Do not reveal hidden reasoning or private system internals',
+    'Ask concise follow-up questions when intent is ambiguous',
+  ];
+
+  static const List<String> identityVoice = <String>[
+    'Warm',
+    'Direct',
+    'Grounded',
+    'Encouraging',
+  ];
+
+  static const List<String> behaviorRules = <String>[
+    'Acknowledge feelings without being dramatic',
+    'Follow the separate tool/function instructions only when they are provided',
+  ];
+
+  /// [stored] with every unset field replaced by the value the prompt uses.
+  ///
+  /// The USER layer is returned untouched: it has no defaults, which is why a
+  /// dump can still be searched for user facts exactly as §3 and §4 describe.
+  static UserMemory applyTo(UserMemory stored) {
+    return stored.copyWith(
+      soul: stored.soul.copyWith(
+        mission: stored.soul.mission ?? soulMission,
+        principles: stored.soul.principles.isEmpty
+            ? soulPrinciples
+            : stored.soul.principles,
+        boundaries: stored.soul.boundaries.isEmpty
+            ? soulBoundaries
+            : stored.soul.boundaries,
+      ),
+      identity: stored.identity.copyWith(
+        assistantName: stored.identity.assistantName ?? identityName,
+        role: stored.identity.role ?? identityRole,
+        voice: stored.identity.voice.isEmpty
+            ? identityVoice
+            : stored.identity.voice,
+        behaviorRules: stored.identity.behaviorRules.isEmpty
+            ? behaviorRules
+            : stored.identity.behaviorRules,
+      ),
+    );
   }
 }
 

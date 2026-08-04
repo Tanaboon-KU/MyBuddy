@@ -50,14 +50,31 @@ class ExperimentDumpService {
     return root;
   }
 
-  /// Writes the full three-layer memory as canonical JSON.
+  /// Writes the full three-layer memory as canonical JSON, twice.
+  ///
+  /// `stored` is what is actually persisted. `effective` is that with the
+  /// prompt defaults filled in — what the model is really told. They differ at
+  /// cold start: `stored` reports `"voice": []` while `effective` reports
+  /// `Warm, Direct, Grounded, Encouraging`, because the substitution happens
+  /// when the prompt is composed, not when memory is saved.
+  ///
+  /// Reporting only `stored` is the trap TASKS.md T-16 describes: an RA reads
+  /// an empty file, sees a reply full of personality, and concludes the prompt
+  /// never received anything.
+  ///
+  /// Score `c1_stored` (§3) and `write` (§4) from `stored`. The USER layer is
+  /// identical in both — it has no defaults — so a search for a user fact
+  /// gives the same answer either way and cannot come back a false positive.
   ///
   /// [label] becomes the file name, e.g. `run01_after_input_a` produces
   /// `memory_dumps/run01_after_input_a.json`. Protocol §3 step 5 and §4 step 3
   /// specify these names.
   Future<File> dumpMemory({String? label}) async {
     final memory = await memoryService.loadMemoryData();
-    final content = canonicalJson(memory.toJson());
+    final content = canonicalJson(<String, Object?>{
+      'stored': memory.toJson(),
+      'effective': MemoryPromptDefaults.applyTo(memory).toJson(),
+    });
     final file = await _fileFor(
       folder: memoryFolderName,
       label: label,

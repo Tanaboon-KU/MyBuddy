@@ -80,7 +80,65 @@ void main() {
       expect(file.path, endsWith('run01_after_input_a.json'));
 
       final decoded = jsonDecode(await file.readAsString());
-      expect(decoded['user']['preferences'], ['tea in the afternoons']);
+      expect(decoded['stored']['user']['preferences'], [
+        'tea in the afternoons',
+      ]);
+    });
+
+    test('reports stored and effective side by side', () async {
+      // T-16. Cold start writes nothing to identity.voice, but the prompt
+      // substitutes four values, so a dump showing only `stored` reads as
+      // though the model were told nothing at all.
+      final decoded =
+          jsonDecode(await (await dumps.dumpMemory()).readAsString())
+              as Map<String, Object?>;
+
+      expect(decoded.keys, containsAll(<String>['stored', 'effective']));
+
+      final stored = decoded['stored']! as Map<String, Object?>;
+      final effective = decoded['effective']! as Map<String, Object?>;
+
+      expect((stored['identity']! as Map)['voice'], isEmpty);
+      expect(
+        (effective['identity']! as Map)['voice'],
+        MemoryPromptDefaults.identityVoice,
+      );
+      expect((stored['soul']! as Map)['mission'], isNull);
+      expect(
+        (effective['soul']! as Map)['mission'],
+        MemoryPromptDefaults.soulMission,
+      );
+    });
+
+    test('keeps the USER layer identical in both halves', () async {
+      // c1_stored (§3) and write (§4) are scored by searching this file. A
+      // default leaking into `user` would score a failed write as a success.
+      await memory.saveMemoryData(
+        const UserMemory(user: UserProfileMemory(name: 'Nott')),
+      );
+
+      final decoded =
+          jsonDecode(await (await dumps.dumpMemory()).readAsString())
+              as Map<String, Object?>;
+
+      expect(
+        (decoded['effective']! as Map)['user'],
+        (decoded['stored']! as Map)['user'],
+      );
+    });
+
+    test('a stored value is not overwritten by its default', () async {
+      await memory.saveMemoryData(
+        const UserMemory(
+          identity: IdentityMemory(voice: <String>['Blunt']),
+        ),
+      );
+
+      final decoded =
+          jsonDecode(await (await dumps.dumpMemory()).readAsString())
+              as Map<String, Object?>;
+
+      expect((decoded['effective']! as Map)['identity']['voice'], ['Blunt']);
     });
 
     test('sorts keys at every level so a plain diff is valid', () async {

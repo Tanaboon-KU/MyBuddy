@@ -508,6 +508,9 @@ class LlmService {
             sysPromptSha256: TurnLogEntry.hashPrompt(composedSystemText),
             sessionRebuilt: needsRebuild,
             replayedMessageCount: needsRebuild ? _lastReplayedMessageCount : 0,
+            toolsExposed: toolSnapshot.definitions
+                .map((t) => t.name)
+                .toList(growable: false),
           );
 
           _canonicalDialogue.add(canonicalUserMessage);
@@ -805,6 +808,7 @@ class ChatGenerationTelemetry {
     required this.sysPromptSha256,
     required this.sessionRebuilt,
     required this.replayedMessageCount,
+    this.toolsExposed = const <String>[],
   });
 
   final int replyStartMs;
@@ -824,6 +828,20 @@ class ChatGenerationTelemetry {
 
   /// Messages replayed into the rebuilt session; 0 when no rebuild happened.
   final int replayedMessageCount;
+
+  /// Names of the tools actually written into `<tools>` on this turn.
+  ///
+  /// Two things need this. Protocol §5.8 step 4 asks the RA to confirm the
+  /// memory-update tools were *not* exposed while the consent flag is off,
+  /// and there was previously no way to check that from the log.
+  ///
+  /// And `create_calendar_event` is registered only when the Google gateway
+  /// reports available (`tool_registry.dart:165`), so it silently adds 1,040
+  /// characters to the prompt when signed in. A sign-in that lapses mid-block
+  /// shrinks the prompt, changes `sys_prompt_sha256` and forces a session
+  /// rebuild. This column is how that gets caught rather than inferred from a
+  /// jump in `sys_prompt_chars`.
+  final List<String> toolsExposed;
 
   int get totalMs => replyEndMs - replyStartMs;
 }

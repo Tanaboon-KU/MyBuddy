@@ -476,6 +476,7 @@ class AppController extends AssistantRuntimeController {
         sysPromptSha256: telemetry?.sysPromptSha256,
         sessionRebuilt: telemetry?.sessionRebuilt,
         replayedMessageCount: telemetry?.replayedMessageCount,
+        toolsExposed: telemetry?.toolsExposed ?? const <String>[],
         prevExtractionStillRunning: prevExtractionStillRunning,
         batteryTempC: batteryStatus.temperatureC,
         batteryPct: batteryStatus.percent,
