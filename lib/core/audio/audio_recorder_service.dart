@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -14,6 +15,24 @@ class AudioRecorderService {
 
   String? _currentPath;
 
+  Future<void> _operationTail = Future<void>.value();
+
+  /// Runs [action] after every operation queued before it.
+  ///
+  /// [start] and [stop] are driven by a press and a release that the UI fires
+  /// without awaiting either, so the two overlap whenever the tap is shorter
+  /// than the native start. Unserialised, the release calls [stop] while
+  /// `isRecording()` is still false, that stop does nothing, and the start
+  /// then succeeds into a recording nobody owns - after which every later
+  /// [start] throws `Recorder is already running` until the app is restarted.
+  ///
+  /// Same shape as `LlmService._runExclusive`.
+  Future<T> _runExclusive<T>(Future<T> Function() action) {
+    final result = _operationTail.then((_) => action());
+    _operationTail = result.then<void>((_) {}, onError: (_, __) {});
+    return result;
+  }
+
   Future<bool> hasPermission() async {
     try {
       return await _recorder.hasPermission();
@@ -22,7 +41,9 @@ class AudioRecorderService {
     }
   }
 
-  Future<String> start() async {
+  Future<String> start() => _runExclusive(_start);
+
+  Future<String> _start() async {
     if (await _recorder.isRecording()) {
       throw StateError('Recorder is already running');
     }
@@ -61,7 +82,9 @@ class AudioRecorderService {
     return outPath;
   }
 
-  Future<String?> stop() async {
+  Future<String?> stop() => _runExclusive(_stop);
+
+  Future<String?> _stop() async {
     if (!await _recorder.isRecording()) {
       return _currentPath;
     }
