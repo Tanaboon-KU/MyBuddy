@@ -140,7 +140,9 @@ class _BuddyHomePageState extends ConsumerState<BuddyHomePage> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => const ExperimentToolsSheet(),
+      builder: (_) => ExperimentToolsSheet(
+        onOpenMemoryEditor: _openMemoryEditor,
+      ),
     );
   }
 

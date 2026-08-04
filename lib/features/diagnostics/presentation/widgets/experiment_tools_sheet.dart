@@ -1,18 +1,30 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../app/app_controller.dart';
 import '../../../../app/providers.dart';
+import 'experiment_status_format.dart';
 
 /// Operator surface for the E1/E2/E3 protocol in `my-tasks/`.
 ///
-/// Groups the capabilities protocol §1a requires the RA to have. Currently
-/// covers T-01 (new conversation), T-02 (cold-start reset) and T-03 (memory
-/// and system-prompt dumps). T-04 will add the per-turn log export and the
-/// extraction-complete indicator here.
+/// Single place for everything §1a asks the RA to be able to do, so the
+/// protocol can be followed without hunting through the normal UI: T-01 (new
+/// conversation), T-02 (cold-start reset), T-03 (memory and system-prompt
+/// dumps), T-04 (per-turn log export, extraction-complete signal) and T-05
+/// (the live readouts and the consent flag).
+///
+/// Per-field Soul/Identity locking stays in `MemoryEditorSheet` — duplicating
+/// that editor here would give the RA two places to set the same value.
+/// [onOpenMemoryEditor] is the hand-off.
 class ExperimentToolsSheet extends ConsumerStatefulWidget {
-  const ExperimentToolsSheet({super.key});
+  const ExperimentToolsSheet({super.key, this.onOpenMemoryEditor});
+
+  /// Opens the memory editor, where E3 §5.3 sets and locks individual fields.
+  /// Invoked after this sheet closes.
+  final Future<void> Function()? onOpenMemoryEditor;
 
   @override
   ConsumerState<ExperimentToolsSheet> createState() =>
@@ -25,14 +37,32 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
   String? _status;
   bool _busy = false;
 
+  /// Drives the countdown to the pending extraction. Without it the "in 0:47"
+  /// would freeze at whatever it read when the sheet was last rebuilt, which
+  /// is worse than showing nothing — the RA would wait on a stale number.
+  Timer? _ticker;
+
+  bool? _autoUpdate;
+  int? _lockedFieldCount;
+
   @override
   void initState() {
     super.initState();
     _loadRootPath();
+    _loadConsentState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      // Only the scheduled phase has a moving number in it.
+      if (ref.read(appControllerProvider).extractionPhase ==
+          ExtractionPhase.scheduled) {
+        setState(() {});
+      }
+    });
   }
 
   @override
   void dispose() {
+    _ticker?.cancel();
     _labelController.dispose();
     super.dispose();
   }
@@ -45,6 +75,22 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
       if (mounted) setState(() => _rootPath = dir.path);
     } catch (e) {
       if (mounted) setState(() => _rootPath = 'unavailable: $e');
+    }
+  }
+
+  Future<void> _loadConsentState() async {
+    final memory = ref.read(memoryServiceProvider);
+    try {
+      final allowed = await memory.isAutoUpdateAllowed();
+      final locked = await memory.loadLockedFields();
+      if (mounted) {
+        setState(() {
+          _autoUpdate = allowed;
+          _lockedFieldCount = locked.length;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _status = 'Could not read consent state: $e');
     }
   }
 
@@ -137,6 +183,37 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     });
   }
 
+  /// The `allowAutoUpdate` toggle §1a item 5 requires, and the flag the E3
+  /// consent test in §5.8 turns off and back on.
+  Future<void> _setAutoUpdate(bool value) async {
+    final previous = _autoUpdate;
+    setState(() => _autoUpdate = value);
+    try {
+      await ref.read(memoryServiceProvider).setAutoUpdateAllowed(value);
+      if (mounted) {
+        setState(
+          () => _status = value
+              ? 'Auto-update ON — memory tools are exposed to the model'
+              : 'Auto-update OFF — no memory writes, tools not exposed',
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _autoUpdate = previous;
+          _status = 'Could not change the consent flag: $e';
+        });
+      }
+    }
+  }
+
+  Future<void> _openMemoryEditor() async {
+    final open = widget.onOpenMemoryEditor;
+    if (open == null) return;
+    Navigator.of(context).pop();
+    await open();
+  }
+
   static String _basename(String path) => path.split(RegExp(r'[\\/]')).last;
 
   /// The extraction-complete signal protocol section 1a item 6 requires.
@@ -156,22 +233,15 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     final details = <String>[];
     final scheduledFor = app.extractionScheduledFor;
     if (phase == ExtractionPhase.scheduled && scheduledFor != null) {
-      final remaining = scheduledFor.difference(DateTime.now());
       details.add(
-        remaining.isNegative
-            ? 'due now'
-            : 'in ~${remaining.inSeconds}s',
+        ExperimentStatusFormat.countdown(scheduledFor, DateTime.now()),
       );
     }
     final result = app.lastExtractionResult;
     if (result != null) details.add(result.csvValue);
     final completedAt = app.lastExtractionCompletedAt;
     if (completedAt != null) {
-      String two(int v) => v.toString().padLeft(2, '0');
-      details.add(
-        'at ${two(completedAt.hour)}:${two(completedAt.minute)}:'
-        '${two(completedAt.second)}',
-      );
+      details.add('at ${ExperimentStatusFormat.clockTime(completedAt)}');
     }
 
     return Container(
@@ -210,6 +280,91 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     );
   }
 
+  /// Live readout of the last logged turn.
+  ///
+  /// `sys_prompt_chars` is the number T-05 asks to be on screen: §1c wants the
+  /// prompt tokenized offline, and this is how the RA notices at the time that
+  /// a prompt suddenly grew or shrank, rather than after the block is over.
+  ///
+  /// Listens to the recorder directly. Extraction columns land on a row up to a
+  /// minute after the turn itself, via `TurnLogRecorder.update`, which does not
+  /// go through [AppController].
+  Widget _buildLastTurnPanel(AppController app) {
+    return ListenableBuilder(
+      listenable: app.turnLog,
+      builder: (context, _) {
+        final entry = app.turnLog.last;
+        final headline = ExperimentStatusFormat.lastTurnHeadline(
+          entry,
+          fallbackChars: ref.read(llmServiceProvider).lastComposedSystemChars,
+        );
+        return Container(
+          margin: const EdgeInsets.only(bottom: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Last turn — $headline',
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              const SizedBox(height: 2),
+              SelectableText(
+                ExperimentStatusFormat.lastTurnDetail(entry),
+                style: const TextStyle(color: Colors.white54, fontSize: 11),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Consent flag plus a pointer to where locking lives.
+  Widget _buildConsentControls() {
+    final allowed = _autoUpdate;
+    final locked = _lockedFieldCount;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          value: allowed ?? false,
+          onChanged: (_busy || allowed == null) ? null : _setAutoUpdate,
+          title: const Text(
+            'Allow auto-update (consent)',
+            style: TextStyle(color: Colors.white),
+          ),
+          subtitle: Text(
+            allowed == null
+                ? 'reading…'
+                : allowed
+                ? 'Memory tools exposed · extraction may write'
+                : 'E3 §5.8 condition — expect zero writes',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.5),
+              fontSize: 12,
+            ),
+          ),
+        ),
+        if (widget.onOpenMemoryEditor != null)
+          _buildAction(
+            icon: Icons.lock_outline_rounded,
+            label: 'Set / lock Soul & Identity fields',
+            subtitle: locked == null
+                ? 'Opens the memory editor'
+                : '$locked field(s) locked · opens the memory editor',
+            onPressed: _openMemoryEditor,
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = ref.watch(appControllerProvider);
@@ -234,7 +389,10 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildHeader(),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
+              _buildLastTurnPanel(app),
+              _buildExtractionStatus(app),
+              const SizedBox(height: 8),
               _buildLabelField(),
               const SizedBox(height: 12),
               _buildAction(
@@ -256,13 +414,13 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
                 onPressed: _exportTurnLog,
               ),
               const Divider(height: 28),
-              _buildExtractionStatus(app),
               _buildAction(
                 icon: Icons.bolt_outlined,
                 label: 'Force extraction now',
                 subtitle: 'Skips the debounce · flagged in the log',
                 onPressed: _forceExtraction,
               ),
+              _buildConsentControls(),
               const Divider(height: 28),
               _buildAction(
                 icon: Icons.add_comment_outlined,
