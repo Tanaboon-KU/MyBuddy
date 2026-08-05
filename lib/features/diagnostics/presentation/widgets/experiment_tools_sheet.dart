@@ -44,6 +44,7 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
 
   bool? _autoUpdate;
   int? _lockedFieldCount;
+  bool? _e3Locked;
 
   @override
   void initState() {
@@ -83,10 +84,12 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     try {
       final allowed = await memory.isAutoUpdateAllowed();
       final locked = await memory.loadLockedFields();
+      final e3 = await memory.isE3Locked();
       if (mounted) {
         setState(() {
           _autoUpdate = allowed;
           _lockedFieldCount = locked.length;
+          _e3Locked = e3;
         });
       }
     } catch (e) {
@@ -205,6 +208,30 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
         });
       }
     }
+  }
+
+  /// One tap for §5.3 step 1, run 16 times.
+  Future<void> _applyE3Baseline() => _run('E3 baseline', () async {
+    final memory = ref.read(memoryServiceProvider);
+    await memory.applyE3Baseline();
+    // A new conversation is required per trial (§5.5) — without it an earlier
+    // refusal teaches the model to refuse the next probe.
+    await ref.read(appControllerProvider).startNewConversation();
+    await _loadConsentState();
+    final locked = await memory.isE3Locked();
+    return 'E3 baseline applied · new conversation · '
+        'condition is ${locked ? 'LOCKED' : 'UNLOCKED'}';
+  });
+
+  Future<void> _setE3Locked(bool locked) async {
+    setState(() => _e3Locked = locked);
+    await _run('E3 lock', () async {
+      await ref.read(memoryServiceProvider).setE3Locked(locked);
+      await _loadConsentState();
+      return locked
+          ? 'LOCKED — identity.voice and soul.boundaries are protected'
+          : 'UNLOCKED — control condition, both fields writable';
+    });
   }
 
   Future<void> _openMemoryEditor() async {
@@ -365,6 +392,48 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     );
   }
 
+  /// E3 setup, reduced to the two actions §5.3 step 5 asks to be one tap each.
+  Widget _buildE3Controls() {
+    final locked = _e3Locked;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildAction(
+          icon: Icons.restore_rounded,
+          label: 'Apply E3 baseline',
+          subtitle:
+              'voice = Warm/Direct/Grounded/Encouraging · boundary set · '
+              'new conversation',
+          onPressed: _applyE3Baseline,
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          value: locked ?? false,
+          onChanged: (_busy || locked == null) ? null : _setE3Locked,
+          title: Text(
+            locked == null
+                ? 'E3 condition — reading…'
+                : 'E3 condition: ${locked ? 'LOCKED' : 'UNLOCKED'}',
+            style: TextStyle(
+              color: locked == null
+                  ? Colors.white54
+                  : (locked ? Colors.greenAccent : Colors.orangeAccent),
+            ),
+          ),
+          subtitle: Text(
+            'Locks identity.voice and soul.boundaries together — the only '
+            'difference between the two conditions',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.5),
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = ref.watch(appControllerProvider);
@@ -421,6 +490,8 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
                 onPressed: _forceExtraction,
               ),
               _buildConsentControls(),
+              const Divider(height: 28),
+              _buildE3Controls(),
               const Divider(height: 28),
               _buildAction(
                 icon: Icons.add_comment_outlined,
