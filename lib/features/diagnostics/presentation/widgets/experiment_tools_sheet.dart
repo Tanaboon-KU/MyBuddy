@@ -291,14 +291,14 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
                   'Extraction: $label',
                   style: TextStyle(color: color, fontSize: 13),
                 ),
-                if (details.isNotEmpty)
-                  Text(
-                    details.join(' · '),
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 11,
-                    ),
-                  ),
+                // Always two lines. The detail line appears once extraction has
+                // something to report, and letting the box grow shifts every
+                // control below it — which breaks tap-by-coordinate automation
+                // partway through a block, silently, after the first turn.
+                Text(
+                  details.isEmpty ? '—' : details.join(' · '),
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                ),
               ],
             ),
           ),

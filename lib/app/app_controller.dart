@@ -483,6 +483,15 @@ class AppController extends AssistantRuntimeController {
         notes: notes,
       ),
     );
+
+    // Grep-able turn boundary. The extraction signal marks the write path, but
+    // nothing marked the end of the read path, so "has the reply finished?"
+    // could only be answered by watching the screen. E1-nowait needs the answer
+    // the instant it changes.
+    debugPrint(
+      'TURN_RECORDED session=$_sessionId turn=$turnIndex '
+      'ttft=${telemetry?.ttftMs} chars=${telemetry?.sysPromptChars}',
+    );
   }
 
   Future<void> _handleMemoryTurnProgress(int turnIndex) async {
