@@ -192,7 +192,9 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     final previous = _autoUpdate;
     setState(() => _autoUpdate = value);
     try {
-      await ref.read(memoryServiceProvider).setAutoUpdateAllowed(value);
+      final memory = ref.read(memoryServiceProvider);
+      await memory.setAutoUpdateAllowed(value);
+      debugPrint('CONSENT_SET allow=${await memory.isAutoUpdateAllowed()}');
       if (mounted) {
         setState(
           () => _status = value
@@ -219,6 +221,17 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     await ref.read(appControllerProvider).startNewConversation();
     await _loadConsentState();
     final locked = await memory.isE3Locked();
+    // Read back from storage, not from _e3Locked, and print both: a 16-trial
+    // block is driven by tap-by-coordinate with no accessibility tree to
+    // query, so this line is the only way the driver can confirm the tap
+    // landed on the right control rather than assume it did.
+    //
+    // Consent is on the line because applyE3Baseline resets to cold start,
+    // which *removes* the consent key, and an absent key reads as allowed. So
+    // every baseline silently turns consent back on, and the §5.8 test has to
+    // set it after this runs, not before. Reported rather than assumed.
+    final consent = await memory.isAutoUpdateAllowed();
+    debugPrint('E3_BASELINE_APPLIED locked=$locked consent=$consent');
     return 'E3 baseline applied · new conversation · '
         'condition is ${locked ? 'LOCKED' : 'UNLOCKED'}';
   });
@@ -226,9 +239,12 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
   Future<void> _setE3Locked(bool locked) async {
     setState(() => _e3Locked = locked);
     await _run('E3 lock', () async {
-      await ref.read(memoryServiceProvider).setE3Locked(locked);
+      final memory = ref.read(memoryServiceProvider);
+      await memory.setE3Locked(locked);
       await _loadConsentState();
-      return locked
+      final stored = await memory.isE3Locked();
+      debugPrint('E3_CONDITION locked=$stored');
+      return stored
           ? 'LOCKED — identity.voice and soul.boundaries are protected'
           : 'UNLOCKED — control condition, both fields writable';
     });
@@ -325,6 +341,8 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
           entry,
           fallbackChars: ref.read(llmServiceProvider).lastComposedSystemChars,
         );
+        final (generation, extraction) =
+            ExperimentStatusFormat.lastTurnDetailLines(entry);
         return Container(
           margin: const EdgeInsets.only(bottom: 4),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -337,11 +355,25 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
             children: [
               Text(
                 'Last turn — $headline',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: Colors.white70, fontSize: 13),
               ),
               const SizedBox(height: 2),
-              SelectableText(
-                ExperimentStatusFormat.lastTurnDetail(entry),
+              // Exactly two capped lines, always. See lastTurnDetailLines: the
+              // detail arrives in two stages, and letting it wrap moves every
+              // control below this panel partway through a block. Truncation
+              // costs nothing here — the per-turn CSV carries the full values.
+              Text(
+                generation,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white54, fontSize: 11),
+              ),
+              Text(
+                extraction,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: Colors.white54, fontSize: 11),
               ),
             ],
@@ -507,7 +539,7 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
                 onPressed: _resetColdStart,
               ),
               const SizedBox(height: 16),
-              if (_status != null) _buildStatus(),
+              _buildStatus(),
               _buildFooter(),
             ],
           ),
@@ -576,6 +608,43 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     );
   }
 
+  /// Line height every pinned readout is measured in.
+  ///
+  /// Set explicitly so [_fixedLines] can compute an exact box height instead of
+  /// depending on the font's own ascent and descent.
+  static const double _lineHeight = 1.35;
+
+  /// [text] in exactly [lines] lines, whatever its length.
+  ///
+  /// `maxLines` alone is not enough: it caps the height but does not hold it,
+  /// so a one-line message still renders one line tall. Every readout in this
+  /// sheet arrives asynchronously — the dump path resolves after the sheet
+  /// opens, the status appears after the first action — and each height change
+  /// moves the controls underneath it. A block driven by tap-by-coordinate then
+  /// starts missing partway through, silently. Truncation is the cheaper cost:
+  /// the CSV and the dumps carry the full values.
+  static Widget _fixedLines(
+    String text, {
+    required int lines,
+    required double fontSize,
+    required Color color,
+  }) {
+    return SizedBox(
+      height: fontSize * _lineHeight * lines,
+      width: double.infinity,
+      child: Text(
+        text,
+        maxLines: lines,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: fontSize,
+          color: color,
+          height: _lineHeight,
+        ),
+      ),
+    );
+  }
+
   Widget _buildStatus() {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -584,9 +653,11 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
         color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(12),
       ),
-      child: Text(
-        _status!,
-        style: const TextStyle(fontSize: 12, color: Colors.white70),
+      child: _fixedLines(
+        _status ?? 'No action run yet',
+        lines: 2,
+        fontSize: 12,
+        color: Colors.white70,
       ),
     );
   }
@@ -607,9 +678,14 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
         Row(
           children: [
             Expanded(
-              child: SelectableText(
+              // Resolved asynchronously, so it is 'resolving…' on one line and
+              // a two-line path a moment later. Pinned for the same reason as
+              // the status box; the copy button is how the full path is taken.
+              child: _fixedLines(
                 path ?? 'resolving...',
-                style: const TextStyle(fontSize: 11, color: Colors.white54),
+                lines: 2,
+                fontSize: 11,
+                color: Colors.white54,
               ),
             ),
             if (path != null)

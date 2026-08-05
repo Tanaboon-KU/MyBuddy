@@ -203,4 +203,62 @@ void main() {
       );
     });
   });
+
+  group('lastTurnDetailLines', () {
+    test('splits generation from extraction', () {
+      expect(
+        ExperimentStatusFormat.lastTurnDetailLines(
+          _entry(
+            sysPromptSha256: '0123456789abcdef',
+            ttftMs: 5180,
+            extractStartMs: 1000,
+            extractEndMs: 4200,
+            extractParseResult: ExtractionParseResult.valid,
+            memoryChanged: true,
+            layersChanged: <String>['user'],
+          ),
+        ),
+        ('sha 0123456789ab · ttft 5180ms', 'extract 3200ms · VALID · '
+            'memory changed [user]'),
+      );
+    });
+
+    // The point of the split: line 2 has to occupy its line before extraction
+    // resolves, or the panel is one line tall for the first minute of a turn
+    // and two lines tall afterwards, which is what moves the controls below it.
+    test('holds the second line while extraction is still unresolved', () {
+      expect(
+        ExperimentStatusFormat.lastTurnDetailLines(
+          _entry(sysPromptSha256: 'abcdef', ttftMs: 900),
+        ),
+        ('sha abcdef · ttft 900ms', '—'),
+      );
+    });
+
+    test('fills both lines before any turn is logged', () {
+      expect(
+        ExperimentStatusFormat.lastTurnDetailLines(null),
+        ('run one turn to populate the log', '—'),
+      );
+    });
+
+    test('carries the same content as the single-line form', () {
+      final entry = _entry(
+        sysPromptSha256: 'abcdef',
+        ttftMs: 5180,
+        sessionRebuilt: true,
+        replayedMessageCount: 8,
+        extractStartMs: 0,
+        extractEndMs: 3200,
+        extractParseResult: ExtractionParseResult.rejected,
+        memoryChanged: false,
+      );
+      final (generation, extraction) =
+          ExperimentStatusFormat.lastTurnDetailLines(entry);
+      expect(
+        '$generation · $extraction',
+        ExperimentStatusFormat.lastTurnDetail(entry),
+      );
+    });
+  });
 }

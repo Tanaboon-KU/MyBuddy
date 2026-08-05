@@ -51,14 +51,42 @@ abstract final class ExperimentStatusFormat {
         '${chars == null ? 'prompt size unknown' : '$chars chars'}';
   }
 
-  /// Second line of the last-turn readout: the columns worth watching live.
+  /// Detail of the last-turn readout, as the two lines it is rendered on.
+  ///
+  /// Split rather than wrapped. The parts arrive in stages — the generation
+  /// columns land when the reply ends, the extraction columns up to a minute
+  /// later — so a single wrapping string is one line early in a turn and two
+  /// lines later in it. This panel sits near the top of the sheet, so that
+  /// growth shifts every control below it, and a block driven by
+  /// tap-by-coordinate starts missing partway through, silently, after the
+  /// first turn whose extraction resolves.
+  ///
+  /// Line 1 is the generation, line 2 the extraction, which is also the order
+  /// they become known in.
+  static (String, String) lastTurnDetailLines(TurnLogEntry? entry) {
+    if (entry == null) return ('run one turn to populate the log', '—');
+    final extraction = _extractionParts(entry).join(' · ');
+    return (
+      _generationParts(entry).join(' · '),
+      extraction.isEmpty ? '—' : extraction,
+    );
+  }
+
+  /// The same detail as one string, for tests and for anywhere the width is
+  /// not constrained.
   ///
   /// Omits anything still unmeasured rather than printing `null`, so a turn
   /// whose extraction has not resolved yet shows a short line instead of a
   /// misleading one.
   static String lastTurnDetail(TurnLogEntry? entry) {
     if (entry == null) return 'run one turn to populate the log';
+    return <String>[
+      ..._generationParts(entry),
+      ..._extractionParts(entry),
+    ].join(' · ');
+  }
 
+  static List<String> _generationParts(TurnLogEntry entry) {
     final parts = <String>['sha ${shortHash(entry.sysPromptSha256)}'];
 
     final ttft = entry.ttftMs;
@@ -70,6 +98,11 @@ abstract final class ExperimentStatusFormat {
         replayed == null ? 'session rebuilt' : 'session rebuilt ($replayed msg)',
       );
     }
+    return parts;
+  }
+
+  static List<String> _extractionParts(TurnLogEntry entry) {
+    final parts = <String>[];
 
     final extractTotal = entry.extractTotalMs;
     if (extractTotal != null) parts.add('extract ${extractTotal}ms');
@@ -88,7 +121,6 @@ abstract final class ExperimentStatusFormat {
             : 'memory unchanged',
       );
     }
-
-    return parts.join(' · ');
+    return parts;
   }
 }
