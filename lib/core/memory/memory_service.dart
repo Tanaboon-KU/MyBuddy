@@ -1399,7 +1399,12 @@ class MemoryService {
     final after = await loadMemoryData();
     return MemoryExtractionOutcome(
       parseResult: ExtractionParseResult.valid,
-      rawOutput: rejectionCodes.isEmpty ? null : rawResponse,
+      // Recorded on every path, including this one. Leaving it null to save a
+      // little space was worse than blank: TurnLogEntry.copyWith reads null as
+      // "keep what is there", so a successful pass left the *previous*
+      // attempt's output on the row beside its own verdict, and the §1b column
+      // meant for seeing what the model produced showed someone else's answer.
+      rawOutput: rawResponse,
       memoryChanged: true,
       layersChanged: _changedLayers(before, after),
       rejectionCodes: rejectionCodes,
