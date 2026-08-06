@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -573,6 +574,15 @@ class LlmService {
   /// the active [_chat]. This prevents session corruption when called from
   /// inside a tool-call (which itself runs inside [_runExclusive]).
   Future<String> _runExclusiveMemoryExtraction(String prompt) async {
+    // The prompt this pass actually receives has never been observable. The
+    // dump service captures the chat system prompt only, so every diagnosis of
+    // the extraction pass so far — including two that turned out to be wrong —
+    // was argued against a prompt reconstructed in a test rather than the one
+    // the model was handed. Printed a line at a time because debugPrint splits
+    // on newlines anyway and a single logcat entry cannot hold the whole thing.
+    for (final line in const LineSplitter().convert(prompt)) {
+      debugPrint('EXTRACTION_PROMPT| $line');
+    }
     return _runExclusive(() async {
       final model = await _ensureModel();
 

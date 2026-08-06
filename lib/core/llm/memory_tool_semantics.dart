@@ -19,6 +19,27 @@ abstract final class MemoryToolSemantics {
       'USER is mutable memory. Reliable newer user statements supersede '
       'conflicting stored user information.';
 
+  /// Why the extraction prompt needs this, and [persistenceRules] is not
+  /// enough on its own.
+  ///
+  /// persistenceRules says a durable change needs an explicit marker — "from
+  /// now on", "always", "never". That is right for the assistant's own soul
+  /// and identity, and wrong for facts the user states about themselves. Six
+  /// runs of five plainly durable facts (a name, a hobby, a job, an allergy, a
+  /// goal, none of them phrased as a request to remember) returned
+  /// `{"updates":[]}` five times — clean JSON, deliberately empty. The model
+  /// was following the prompt.
+  ///
+  /// The permission already existed in [updateUserMemoryDescription] — "use
+  /// your judgment without asking permission" — but that string only ever
+  /// reaches the chat tool prompt, so extraction saw the rule that suppresses
+  /// capture and not the one that allows it.
+  static const userCaptureRule =
+      'A durable fact the user states about themselves — a name, trait, '
+      'preference, goal, allergy or similar — is worth storing even when they '
+      'do not ask you to remember it. Only changes to your own SOUL or '
+      'IDENTITY need an explicit persistent instruction.';
+
   static const soulFields = <String, String>{
     'mission': 'The assistant primary purpose. Use set.',
     'principles': 'General durable operating values.',
