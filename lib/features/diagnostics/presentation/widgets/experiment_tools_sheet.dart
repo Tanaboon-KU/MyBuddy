@@ -33,6 +33,7 @@ class ExperimentToolsSheet extends ConsumerStatefulWidget {
 
 class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
   final _labelController = TextEditingController();
+  final _seedController = TextEditingController();
   String? _rootPath;
   String? _status;
   bool _busy = false;
@@ -65,6 +66,7 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
   void dispose() {
     _ticker?.cancel();
     _labelController.dispose();
+    _seedController.dispose();
     super.dispose();
   }
 
@@ -234,6 +236,51 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     debugPrint('E3_BASELINE_APPLIED locked=$locked consent=$consent');
     return 'E3 baseline applied · new conversation · '
         'condition is ${locked ? 'LOCKED' : 'UNLOCKED'}';
+  });
+
+  /// Seeds one USER-layer fact, one tap per read-path pair.
+  ///
+  /// Typed as `field=value` into a single box rather than picked from a menu
+  /// because the block is driven by `adb shell input text` against
+  /// tap-by-coordinate: a text field is one reliable target, a dropdown is a
+  /// second popup to find. The twelve values live in `tools/e4_auto.ps1`, next
+  /// to the probes they are supposed to answer, rather than buried in Dart
+  /// where a reader of the results could not check them.
+  Future<void> _applyE4Seed() => _run('USER seed', () async {
+    final raw = _seedController.text.trim();
+    final split = raw.indexOf('=');
+    if (split <= 0) {
+      throw StateError(
+        'type field=value, e.g. preferences=Drinks tea in the afternoon',
+      );
+    }
+    final field = raw.substring(0, split).trim().toLowerCase();
+    final value = raw.substring(split + 1);
+
+    final memory = ref.read(memoryServiceProvider);
+    await memory.applyE4Seed(field, value);
+    // A new conversation for the reason every E3 trial needs one: the probe
+    // has to be the first thing the model sees, or the reply is answering the
+    // conversation instead of the memory.
+    await ref.read(appControllerProvider).startNewConversation();
+    await _loadConsentState();
+
+    // Read back from storage rather than trusting the write, and print it.
+    // The driver taps by coordinate with no widget tree to query, so this line
+    // is the only way it can confirm the seed reached the intended field
+    // instead of assuming the tap landed.
+    final profile = (await memory.loadMemoryData()).user;
+    final readBack = switch (field) {
+      'name' => profile.name ?? '',
+      'traits' => profile.traits.join('|'),
+      'preferences' => profile.preferences.join('|'),
+      'goals' => profile.goals.join('|'),
+      _ => profile.facts.join('|'),
+    };
+    debugPrint('E4_SEED_APPLIED field=$field value="$readBack"');
+    return readBack.isEmpty
+        ? 'Seed did NOT persist — user.$field is still empty'
+        : 'Seeded user.$field · new conversation';
   });
 
   Future<void> _setE3Locked(bool locked) async {
@@ -466,6 +513,39 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
     );
   }
 
+  /// Read-path setup: one text box and one tap per pair.
+  ///
+  /// Deliberately sits below every control e1/e2/e3_auto.ps1 tap from the top
+  /// of the sheet and above the two they reach by scrolling to the bottom, so
+  /// all three drivers' tap tables stay valid. Those coordinates are hardcoded
+  /// and had to be re-derived by hand the last time this layout moved.
+  Widget _buildE4Controls() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          controller: _seedController,
+          decoration: InputDecoration(
+            labelText: 'USER seed (field=value)',
+            hintText: 'preferences=Drinks tea in the afternoon',
+            helperText: 'name · traits · preferences · goals · facts',
+            helperMaxLines: 2,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            isDense: true,
+          ),
+        ),
+        _buildAction(
+          icon: Icons.plagiarism_outlined,
+          label: 'Seed USER layer',
+          subtitle:
+              'Cold start · writes the fact by hand · new conversation — '
+              'measures the read path with extraction out of the way',
+          onPressed: _applyE4Seed,
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = ref.watch(appControllerProvider);
@@ -524,6 +604,8 @@ class _ExperimentToolsSheetState extends ConsumerState<ExperimentToolsSheet> {
               _buildConsentControls(),
               const Divider(height: 28),
               _buildE3Controls(),
+              const Divider(height: 28),
+              _buildE4Controls(),
               const Divider(height: 28),
               _buildAction(
                 icon: Icons.add_comment_outlined,

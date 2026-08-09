@@ -951,6 +951,57 @@ class MemoryService {
     debugPrint('MemoryService.applyE3Baseline: applied');
   }
 
+  /// USER-layer field names [applyE4Seed] accepts, matching the layer's keys.
+  static const Set<String> e4SeedFields = <String>{
+    'name',
+    'traits',
+    'preferences',
+    'goals',
+    'facts',
+  };
+
+  /// Puts one known fact into the USER layer without going through extraction.
+  ///
+  /// E1, E2 and T-26 between them measured the write path across 37 runs and
+  /// found it broken every time, which leaves the read path — does the
+  /// companion *use* a fact it already holds — measured zero times: no run has
+  /// ever reached a probe with a non-empty USER layer, so every 0/12 in E2 is
+  /// consistent both with "the model ignores memory" and with "the model was
+  /// never given any". Seeding by hand is the only way to separate those two
+  /// while the write path is still down.
+  ///
+  /// Writes through [saveMemoryData], the same call the memory editor uses, so
+  /// the stored bytes are the ones an operator typing into the editor would
+  /// have produced. This skips extraction, not persistence, and deliberately
+  /// changes nothing about how the prompt is later composed or read.
+  ///
+  /// Starts from cold for the reason [applyE3Baseline] does: a pair must not
+  /// inherit the pair before it.
+  Future<void> applyE4Seed(String field, String value) async {
+    final key = field.trim().toLowerCase();
+    final text = value.trim();
+    if (!e4SeedFields.contains(key)) {
+      throw ArgumentError(
+        'unknown USER field "$field" — expected one of '
+        '${e4SeedFields.join(', ')}',
+      );
+    }
+    if (text.isEmpty) {
+      throw ArgumentError('seed value for "$key" is empty');
+    }
+
+    await resetToColdStart();
+    final profile = switch (key) {
+      'name' => UserProfileMemory(name: text),
+      'traits' => UserProfileMemory(traits: <String>[text]),
+      'preferences' => UserProfileMemory(preferences: <String>[text]),
+      'goals' => UserProfileMemory(goals: <String>[text]),
+      _ => UserProfileMemory(facts: <String>[text]),
+    };
+    await saveMemoryData(UserMemory(user: profile));
+    debugPrint('MemoryService.applyE4Seed: $key = "$text"');
+  }
+
   /// Locks or unlocks exactly the two fields E3 probes.
   ///
   /// This is the only difference between the LOCKED and UNLOCKED conditions,
