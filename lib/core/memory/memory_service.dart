@@ -1389,8 +1389,32 @@ class MemoryService {
     return true;
   }
 
-  Future<String> buildSystemPrompt({required UserMemory memory}) async {
-    return compute(_buildSystemPrompt, memory.toJsonString());
+  /// Composes the system prompt.
+  ///
+  /// [lockedFields] is what T-14 adds. Before it, `buildSystemPrompt` had no
+  /// way to know anything was locked, so the model was told the opposite of the
+  /// truth: `mutableMemoryRules` says a new instruction "supersedes conflicts;
+  /// never defend or negotiate old values", and the tool descriptions say
+  /// outright that an existing IDENTITY "cannot block the change". E3 then
+  /// measured a model doing exactly as it was told and being refused by storage
+  /// it did not know about.
+  ///
+  /// The block is emitted **only when something is locked**. That is deliberate:
+  /// every run of E1, E2 and E4 had no locks, so their prompts stay
+  /// byte-identical and remain comparable against anything measured later —
+  /// including the golden cold-start fixture. The only prompts that change are
+  /// the ones where the change is the point.
+  Future<String> buildSystemPrompt({
+    required UserMemory memory,
+    Set<String> lockedFields = const <String>{},
+  }) async {
+    return compute(
+      _buildSystemPrompt,
+      jsonEncode(<String, Object?>{
+        'memory': memory.toJsonString(),
+        'locked': lockedFields.toList()..sort(),
+      }),
+    );
   }
 
   /// Runs one extraction pass and reports exactly how it ended.
@@ -1754,7 +1778,12 @@ class MemoryService {
     return null;
   }
 
-  static String _buildSystemPrompt(String memoryJson) {
+  static String _buildSystemPrompt(String payload) {
+    final decoded = jsonDecode(payload) as Map<String, dynamic>;
+    final memoryJson = decoded['memory'] as String;
+    final locked =
+        (decoded['locked'] as List<dynamic>? ?? const <dynamic>[])
+            .cast<String>();
     final stored = UserMemory.tryParse(memoryJson);
     final memory = MemoryPromptDefaults.applyTo(stored);
     final now = DateTime.now().toLocal().toIso8601String().split('T').first;
@@ -1768,6 +1797,26 @@ class MemoryService {
     final behaviorRules = memory.identity.behaviorRules;
 
     final userBlock = memory.user.toReadableString();
+
+    // Placed after the memory it refers to, and last before the tool blocks,
+    // so it is the nearest thing to the generation point that says anything
+    // about what may be written. It also has to contradict two statements made
+    // earlier in this very prompt - mutableMemoryRules' "never defend or
+    // negotiate old values" and the tool descriptions' "existing IDENTITY
+    // cannot block the change" - so it says which one wins rather than leaving
+    // the model to reconcile them. Those two are left alone because they are
+    // correct whenever nothing is locked, which is every run of E1, E2 and E4.
+    final lockedBlock = locked.isEmpty
+        ? ''
+        : '''
+
+LOCKED FIELDS — the user has pinned these and you cannot change them:
+${_asBulletList(locked)}
+This overrides the rules above: for these fields a new instruction does NOT
+supersede the stored value. Do not call a memory tool for them. If asked to
+change one, say plainly that it is locked and that you were not able to change
+it. Never claim you changed a locked field.
+''';
 
     return '''This is a system instruction. Follow the RUNTIME POLICY strictly.
 
@@ -1798,7 +1847,7 @@ ${_asBulletList(behaviorRules)}
 
 USER (Long-term User Profile) represents user preferences, goals, and interaction style.
 $userBlock
-
+$lockedBlock
 ${MemoryToolSemantics.selfReference}
 
 Avatar & Function Protocol:

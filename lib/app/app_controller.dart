@@ -363,7 +363,10 @@ class AppController extends AssistantRuntimeController {
 
     try {
       final memoryData = await memory.loadMemoryData();
-      final systemPrompt = await memory.buildSystemPrompt(memory: memoryData);
+      final systemPrompt = await memory.buildSystemPrompt(
+        memory: memoryData,
+        lockedFields: await memory.loadLockedFields(),
+      );
 
       _conversation.add(_createMessage('user', userText));
       notifyListeners();
