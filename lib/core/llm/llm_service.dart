@@ -86,6 +86,10 @@ class LlmService {
   Future<void>? _initializeFuture;
   Future<void>? _activationFuture;
   String? _systemFingerprint;
+
+  /// Set once an extraction pass has generated on this model, cleared when the
+  /// chat session is rebuilt. See [_chatSurvivesExtraction].
+  bool _extractionTouchedTheModel = false;
   final List<Message> _canonicalDialogue = <Message>[];
 
   String? _lastComposedSystemText;
@@ -429,8 +433,17 @@ class LlmService {
       int? firstTokenMs;
 
       final needsRebuild =
-          _chat == null || _systemFingerprint != composedSystemText;
+          _chat == null ||
+          _systemFingerprint != composedSystemText ||
+          !_chatSurvivesExtraction;
       if (needsRebuild) {
+        if (_extractionTouchedTheModel) {
+          debugPrint(
+            'LlmService: rebuilding the chat session because an extraction '
+            'pass generated on this model (T-21/T-29)',
+          );
+        }
+        _extractionTouchedTheModel = false;
         if (_chat != null) {
           try {
             await _chat!.session.close();
@@ -679,12 +692,47 @@ class LlmService {
         debugPrint('LlmService: memory extraction stalled for 60s.');
         throw const MemoryExtractionTimeoutException(Duration(seconds: 60));
       } finally {
+        // Regardless of how the pass ended. What invalidates the chat session
+        // is that a second session generated on this LlmInference at all, not
+        // whether it produced anything useful.
+        _extractionTouchedTheModel = true;
         try {
           await session.close().timeout(const Duration(seconds: 5));
         } catch (_) {}
       }
     });
   }
+
+  /// Why an extraction pass forces the chat session to be rebuilt — T-21 and
+  /// T-29, which are one fault wearing two faces.
+  ///
+  /// [_runExclusiveMemoryExtraction] deliberately does not touch [_chat],
+  /// on the reasoning that a separate session cannot disturb it. The device
+  /// says otherwise, and the vendored fork shows why: every session is created
+  /// from the one `LlmInference` (`MediaPipeEngine.createSession` hands them
+  /// all the same engine and even the same `_partialResults` flow), and that
+  /// engine carries the working context. Generating from a second session
+  /// leaves the first one's context gone.
+  ///
+  /// Nothing noticed, because `needsRebuild` only asks whether the composed
+  /// system prompt changed. Extraction that stores nothing leaves it identical,
+  /// so the app kept the old [_chat] and reported `session_rebuilt=N` with
+  /// `replayed_message_count=0` — while the native session had in fact been
+  /// emptied. Both measurements follow:
+  ///
+  /// * **T-21.** The next turn re-prefills the whole prompt, so `ttft_ms` goes
+  ///   from 1,843-1,925 to 20,601-27,799 in E1 block 2, with the log insisting
+  ///   nothing was rebuilt.
+  /// * **T-29.** That turn also answers as though the conversation never
+  ///   happened. E2 got byte-identical replies from condition A and condition B
+  ///   in all twelve pairs, and E1's `nowait` arm — the one that never runs
+  ///   extraction — is the control that still remembers.
+  ///
+  /// Rebuilding replays the dialogue through `clearHistory(replayHistory:)`, so
+  /// the conversation comes back. The re-prefill cost does not go away; it was
+  /// always being paid, silently and for nothing. Now it buys correct context
+  /// and shows up honestly as `session_rebuilt=Y`.
+  bool get _chatSurvivesExtraction => !_extractionTouchedTheModel;
 
   Future<String> extractMemoryFromChat(
     String currentMemoryJson, {
