@@ -1392,6 +1392,14 @@ class MemoryService {
       return const MemoryExtractionOutcome(
         parseResult: ExtractionParseResult.timedOut,
       );
+    } on MemoryExtractionAbortedException catch (e) {
+      // Recorded separately from `failed` so the log can tell a pass that
+      // finished and produced nothing usable from one that was cut off partway
+      // through producing rubbish. Both store nothing; only one was expensive.
+      debugPrint('MemoryService: extraction aborted: $e');
+      return const MemoryExtractionOutcome(
+        parseResult: ExtractionParseResult.aborted,
+      );
     } catch (e) {
       debugPrint('MemoryService: extraction call failed: $e');
       return MemoryExtractionOutcome(

@@ -1,13 +1,18 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 
 import '../../shared/utils/json_extractor.dart';
+import 'repetition_guard.dart';
 import 'tool_protocol.dart';
-import 'package:flutter/foundation.dart';
 
 final class ModelTurnCollector {
-  const ModelTurnCollector({required this.modelType});
+  const ModelTurnCollector({
+    required this.modelType,
+    this.repetitionGuard = const RepetitionGuard(),
+  });
 
   final ModelType modelType;
+  final RepetitionGuard repetitionGuard;
 
   Future<ModelTurn> collect(Stream<ModelResponse> responses) async {
     final text = StringBuffer();
@@ -30,6 +35,24 @@ final class ModelTurnCollector {
     if (calls.isNotEmpty) return ToolCallTurn(calls);
 
     final rawText = text.toString();
+
+    // T-30. Measured and reported, deliberately not acted on.
+    //
+    // Two of E4's twenty-four replies ended in this collapse and the user read
+    // the result. Truncating instead would decide two things this class should
+    // not: what the user ought to see in place of a broken answer is a product
+    // call, and trimming would change `reply_text`, the column E1 through E4
+    // were every one of them scored from, so a later block could no longer be
+    // set against them. Counting it first gives the rate on a build whose
+    // replies still mean the same thing as the ones already measured.
+    if (repetitionGuard.hasCollapsed(rawText)) {
+      final ratio = repetitionGuard.distinctRatio(rawText);
+      debugPrint(
+        'REPLY_COLLAPSED chars=${rawText.length} '
+        'distinct${repetitionGuard.gram}=${ratio?.toStringAsFixed(2)}',
+      );
+    }
+
     final parsed = FunctionCallParser.parseAll(rawText, modelType: modelType);
     if (parsed.isNotEmpty) return ToolCallTurn(parsed);
 

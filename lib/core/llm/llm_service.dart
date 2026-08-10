@@ -14,6 +14,7 @@ import 'llm_platform.dart';
 import 'memory_extraction_prompt_builder.dart';
 import 'model_turn_collector.dart';
 import 'prompt_budgeter.dart';
+import 'repetition_guard.dart';
 import 'temporal_context.dart';
 import 'tool_loop_chat.dart';
 import 'tool_orchestrator.dart';
@@ -571,6 +572,26 @@ class LlmService {
     });
   }
 
+  /// Wall clock one extraction pass may take, as opposed to the gap between
+  /// two tokens that `Stream.timeout` bounds.
+  ///
+  /// 90s is generous against a pass that works: the successful T-07
+  /// verification finished in 10.3s, and pre-fix passes averaged 6.7s. It is
+  /// aimed at the 175,576 ms measured in E1 block 2, where the user waits
+  /// three minutes for a result that fails to parse and, through T-21, pays
+  /// for it again on the next turn.
+  static const Duration extractionDeadline = Duration(seconds: 90);
+
+  /// How much one pass may emit before it is written off.
+  ///
+  /// A valid patch for this schema runs to a couple of hundred characters. The
+  /// runaway reached 5,438 and stopped on its own, not because anything
+  /// stopped it. Set well clear of anything useful so it only catches a pass
+  /// that has already gone wrong.
+  static const int extractionCharLimit = 2000;
+
+  static const RepetitionGuard _repetitionGuard = RepetitionGuard();
+
   /// Runs memory extraction in a temporary one-shot session WITHOUT closing
   /// the active [_chat]. This prevents session corruption when called from
   /// inside a tool-call (which itself runs inside [_runExclusive]).
@@ -599,17 +620,63 @@ class LlmService {
       try {
         await session.addQueryChunk(Message.text(text: prompt, isUser: true));
         final responseBuffer = StringBuffer();
+        final started = DateTime.now();
+        var sinceGuardCheck = 0;
+        String? abortReason;
+
+        // The `.timeout` below is kept, but it is not the budget. Dart's
+        // Stream.timeout measures the gap *between* events, so a model
+        // emitting a token every few hundred ms never trips it however long it
+        // runs — E1 block 2 measured a pass at 175,576 ms that never fired,
+        // and STEP0_VERIFICATION recorded one at 228,073 ms before that. The
+        // three checks in the loop are the real ceilings.
         await for (final chunk in session.getResponseAsync().timeout(
           const Duration(seconds: 60),
         )) {
           responseBuffer.write(chunk);
+
+          if (responseBuffer.length > extractionCharLimit) {
+            abortReason = 'char-limit';
+            break;
+          }
+          if (DateTime.now().difference(started) > extractionDeadline) {
+            abortReason = 'deadline';
+            break;
+          }
+          // Not every chunk: hasCollapsed walks a 200-character window and
+          // responseBuffer.toString() copies the lot, so checking per token
+          // would make this quadratic for no benefit at 8 tokens a second.
+          sinceGuardCheck += chunk.length;
+          if (sinceGuardCheck >= 50) {
+            sinceGuardCheck = 0;
+            if (_repetitionGuard.hasCollapsed(responseBuffer.toString())) {
+              abortReason = 'repetition';
+              break;
+            }
+          }
         }
-        return _cleanResponse(responseBuffer.toString());
+
+        final elapsed = DateTime.now().difference(started);
+        final raw = responseBuffer.toString();
+        if (abortReason != null) {
+          // Breaking out of `await for` cancels the subscription, which is what
+          // stops the model burning the rest of the pass.
+          debugPrint(
+            'EXTRACTION_ABORTED reason=$abortReason chars=${raw.length} '
+            'ms=${elapsed.inMilliseconds}',
+          );
+          throw MemoryExtractionAbortedException(
+            abortReason,
+            elapsed,
+            raw.length,
+          );
+        }
+        return _cleanResponse(raw);
       } on TimeoutException {
         // Previously this returned '', which the caller could not tell apart
         // from "the model had nothing to change". The protocol needs the two
         // separated (extract_parse_result), so it now surfaces as an error.
-        debugPrint('LlmService: memory extraction timed out after 60s.');
+        debugPrint('LlmService: memory extraction stalled for 60s.');
         throw const MemoryExtractionTimeoutException(Duration(seconds: 60));
       } finally {
         try {
@@ -869,6 +936,29 @@ class MemoryExtractionTimeoutException implements Exception {
   @override
   String toString() =>
       'Memory extraction exceeded ${budget.inSeconds}s and was abandoned.';
+}
+
+/// Thrown when an extraction pass is cut off rather than allowed to finish.
+///
+/// Distinct from [MemoryExtractionTimeoutException] because the two describe
+/// different faults: a timeout is a pass that stalled, this is one that was
+/// producing output steadily and producing rubbish. Recorded as `ABORTED`.
+class MemoryExtractionAbortedException implements Exception {
+  const MemoryExtractionAbortedException(
+    this.reason,
+    this.elapsed,
+    this.chars,
+  );
+
+  /// `repetition`, `deadline` or `char-limit`.
+  final String reason;
+  final Duration elapsed;
+  final int chars;
+
+  @override
+  String toString() =>
+      'Memory extraction was stopped after ${elapsed.inMilliseconds}ms and '
+      '$chars characters: $reason.';
 }
 
 /// Outcome of one extraction pass, for the write-path columns of section 1b.

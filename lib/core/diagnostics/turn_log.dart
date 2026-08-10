@@ -23,9 +23,19 @@ enum ExtractionParseResult {
   /// No JSON could be extracted from the model output.
   failed('FAILED'),
 
-  /// The 60 s extraction budget ran out. Previously indistinguishable from
+  /// The extraction budget ran out. Previously indistinguishable from
   /// "nothing to change" because the timeout path returns an empty string.
   timedOut('TIMED_OUT'),
+
+  /// Stopped early because the output had gone degenerate, or had run past the
+  /// character ceiling — see [RepetitionGuard] and T-28.
+  ///
+  /// Separate from [failed] on purpose. Both end with nothing stored, but they
+  /// say different things: `FAILED` is a pass that finished and produced no
+  /// usable JSON, `ABORTED` is one that was still going and was cut off. E1
+  /// block 2 recorded five of the latter as the former, at about three minutes
+  /// each, which is why the cost went unnoticed until the timings were read.
+  aborted('ABORTED'),
 
   /// Extraction did not run for this turn (debounced, or consent is off).
   notRun('NOT_RUN');
