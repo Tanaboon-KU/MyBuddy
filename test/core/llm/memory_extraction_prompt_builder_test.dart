@@ -73,6 +73,12 @@ void main() {
   // the user's goal, and none of the five real facts was captured. VALID, and
   // corrupt. An empty result keeps the memory clean; that one does not, so the
   // ordering stays as it is until the extraction pass is redesigned. See T-26.
+  //
+  // Still the invariant after 231af60 was reverted, only the JSON it orders has
+  // changed: the last non-empty object is the schema template again rather than
+  // a worked example. Copying that one is rejected outright, so the ordering is
+  // now protecting against a cheaper mistake — see
+  // extraction_prompt_template_fails_clean_test.dart.
   test('the empty result stays nearest the generation point', () {
     for (final section in MemoryExtractionSection.values) {
       final prompt = builder.build(
