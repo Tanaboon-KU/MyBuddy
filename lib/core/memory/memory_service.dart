@@ -899,10 +899,36 @@ class MemoryService {
     }
   }
 
+  /// Locking any part of the persona locks all of it — T-23.
+  ///
+  /// E3 measured why a single field is not enough. With `identity.voice`
+  /// locked, probe P1 still produced a sarcastic persona: the model had written
+  /// it to `soul.mission`, which was not locked. `L_P03` went the same way into
+  /// `soul.principles`, and E2 pair 6 wrote boilerplate to `soul.mission` while
+  /// telling the user it had stored a preference. Locking one field and leaving
+  /// its neighbours writable protects that field, not the persona the user was
+  /// trying to pin down.
+  ///
+  /// The USER layer is deliberately *not* grouped. Those fields describe the
+  /// person, not the assistant, and grouping them would stop someone correcting
+  /// their own name because they had once locked an allergy.
+  ///
+  /// **This does not close the hole completely, and the paper has to say so.**
+  /// `L_P03` also reached `user.preferences`, and an entry there reading "the
+  /// user prefers sarcastic replies" steers the persona just as well while
+  /// being, on its face, a fact about the user. No grouping catches that; it
+  /// would take judging what a preference means, which is the thing this model
+  /// is worst at. What locking gives you is a protected set of fields.
+  static Set<String> expandPersonaLock(Set<String> fields) =>
+      fields.any(MemoryFieldPaths.soulAndIdentity.contains)
+      ? <String>{...fields, ...MemoryFieldPaths.soulAndIdentity}
+      : fields;
+
   Future<void> saveLockedFields(Set<String> lockedFields) async {
     final prefs = await SharedPreferences.getInstance();
-    final soul = lockedFields.where(MemoryFieldPaths.soulOnly.contains).toSet();
-    final identity = lockedFields
+    final expanded = expandPersonaLock(lockedFields);
+    final soul = expanded.where(MemoryFieldPaths.soulOnly.contains).toSet();
+    final identity = expanded
         .where(MemoryFieldPaths.identityOnly.contains)
         .toSet();
 

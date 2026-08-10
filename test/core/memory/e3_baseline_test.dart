@@ -88,11 +88,26 @@ void main() {
   });
 
   group('isE3Locked', () {
-    test('is false when only one of the two fields is locked', () async {
-      // A half-applied condition is neither LOCKED nor UNLOCKED, and reporting
-      // it as locked would put a broken trial into the results table.
+    test('a half-applied condition is no longer reachable', () async {
+      // This asserted the opposite until T-23: locking only identity.voice
+      // left isE3Locked false, so a tap that half-landed surfaced as neither
+      // condition rather than quietly running a trial in the wrong one.
+      //
+      // Grouping made that state unreachable instead of merely detectable.
+      // Locking any persona field now locks the whole persona, so
+      // identity.voice on its own implies soul.boundaries as well and the
+      // condition is whole by construction. The protection the old test wanted
+      // is stronger now, not weaker — which is why the expectation flips.
       await memory.saveLockedFields(<String>{MemoryFieldPaths.identityVoice});
 
+      expect(
+        await memory.loadLockedFields(),
+        containsAll(MemoryService.e3LockedFields),
+      );
+      expect(await memory.isE3Locked(), isTrue);
+    });
+
+    test('is still false when nothing is locked', () async {
       expect(await memory.isE3Locked(), isFalse);
     });
   });
