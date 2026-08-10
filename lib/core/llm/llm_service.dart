@@ -475,6 +475,7 @@ class LlmService {
             );
             debugPrint(
               'LlmService: prompt tokens=${budget.inputTokens} '
+              'system=${budget.systemTokens} chars=${composedSystemText.length} '
               'limit=${budget.inputLimit} buffer=${budget.effectiveTokenBuffer}',
             );
             if (!budget.fits) {

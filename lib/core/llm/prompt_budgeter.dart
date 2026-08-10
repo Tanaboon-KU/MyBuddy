@@ -5,11 +5,23 @@ final class PromptBudgetAssessment {
     required this.inputTokens,
     required this.inputLimit,
     required this.effectiveTokenBuffer,
+    required this.systemTokens,
   });
 
   final int inputTokens;
   final int inputLimit;
   final int effectiveTokenBuffer;
+
+  /// What the composed system prompt alone costs, by the model's own tokenizer.
+  ///
+  /// Already computed as part of [inputTokens]; carried separately because §1c
+  /// asks for the system prompt's own count and forbids estimating it, and
+  /// [inputTokens] cannot answer that - it also carries
+  /// [PromptBudgeter.templateSafetyTokens], the user's message and the whole
+  /// replayed history. The 1,843 recorded in TASKS.md as "the prompt's token
+  /// count" is an [inputTokens] reading, so it overstates the prompt by at
+  /// least the 64-token safety margin plus that turn's user text.
+  final int systemTokens;
 
   bool get fits => inputTokens <= inputLimit;
 }
@@ -39,8 +51,8 @@ final class PromptBudgeter {
       maxTokens: maxTokens,
       configuredTokenBuffer: configuredTokenBuffer,
     );
-    var inputTokens = templateSafetyTokens;
-    inputTokens += await session.sizeInTokens(systemText);
+    final systemTokens = await session.sizeInTokens(systemText);
+    var inputTokens = templateSafetyTokens + systemTokens;
     inputTokens += await session.sizeInTokens(userText);
     for (final message in history) {
       inputTokens += await session.sizeInTokens(message.text);
@@ -50,6 +62,7 @@ final class PromptBudgeter {
       inputTokens: inputTokens,
       inputLimit: maxTokens - effectiveBuffer,
       effectiveTokenBuffer: effectiveBuffer,
+      systemTokens: systemTokens,
     );
   }
 }
