@@ -1407,14 +1407,46 @@ class MemoryService {
   Future<String> buildSystemPrompt({
     required UserMemory memory,
     Set<String> lockedFields = const <String>{},
+    bool includeUserBlock = true,
   }) async {
     return compute(
       _buildSystemPrompt,
       jsonEncode(<String, Object?>{
         'memory': memory.toJsonString(),
         'locked': lockedFields.toList()..sort(),
+        'includeUser': includeUserBlock,
       }),
     );
+  }
+
+  /// The USER layer, written to go **after** the tool blocks — T-12.
+  ///
+  /// RUNTIME POLICY has six rules and every one of them is about *writing*
+  /// memory. Nothing has ever told the model to read the profile back, and E4
+  /// measured the result: with the fact verifiably in the prompt, explicit
+  /// recall was 7/12 and applying it unasked was 2/12.
+  ///
+  /// Two changes, both aimed at something E4 actually observed.
+  ///
+  /// **Position.** Inline, the USER block sits about a quarter of the way in
+  /// with some 5,500 characters of tool definitions after it. T-26 established
+  /// that this model reproduces whatever sits nearest the generation point —
+  /// that is the whole explanation for the schema-echo — so recency is the one
+  /// lever it is known to respond to. Put last, the profile is the final thing
+  /// it reads before answering.
+  ///
+  /// **Whose facts these are.** Three of E4's five explicit failures were the
+  /// model answering about itself: *"As an AI, I don't have personal
+  /// preferences"* to "when do I like to work", and a description of its own
+  /// persona to "how would you describe me". The prompt already says *"you"
+  /// refers to you, not the human user*, and that was not enough, so the rule
+  /// is repeated here where the profile is.
+  ///
+  /// Kept separate from [buildSystemPrompt] rather than folded in, so the old
+  /// arrangement still composes exactly as it did and the before half of the
+  /// comparison stays reproducible.
+  Future<String> buildUserPromptTail({required UserMemory memory}) async {
+    return compute(_buildUserPromptTail, memory.toJsonString());
   }
 
   /// Runs one extraction pass and reports exactly how it ended.
@@ -1784,6 +1816,7 @@ class MemoryService {
     final locked =
         (decoded['locked'] as List<dynamic>? ?? const <dynamic>[])
             .cast<String>();
+    final includeUser = decoded['includeUser'] as bool? ?? true;
     final stored = UserMemory.tryParse(memoryJson);
     final memory = MemoryPromptDefaults.applyTo(stored);
     final now = DateTime.now().toLocal().toIso8601String().split('T').first;
@@ -1845,9 +1878,7 @@ ${_asBulletList(identityVoice)}
 Response Rules:
 ${_asBulletList(behaviorRules)}
 
-USER (Long-term User Profile) represents user preferences, goals, and interaction style.
-$userBlock
-$lockedBlock
+${includeUser ? '$_userSectionHeader\n$userBlock\n' : ''}$lockedBlock
 ${MemoryToolSemantics.selfReference}
 
 Avatar & Function Protocol:
@@ -1857,6 +1888,28 @@ Avatar & Function Protocol:
 
 Remember today is $now. (yyyy-MM-dd format)
 ''';
+  }
+
+  static const String _userSectionHeader =
+      'USER (Long-term User Profile) represents user preferences, goals, and '
+      'interaction style.';
+
+  static String _buildUserPromptTail(String memoryJson) {
+    final stored = UserMemory.tryParse(memoryJson);
+    final memory = MemoryPromptDefaults.applyTo(stored);
+
+    return '''$_userSectionHeader
+${memory.user.toReadableString()}
+
+HOW TO USE THE USER PROFILE:
+- You MUST use it when you answer. Apply it without being asked, and without
+  announcing that you are using it.
+- If it records something the user avoids, do not offer that thing at all.
+- If it is empty or does not cover the question, say you do not know. Do not
+  guess, and do not describe preferences the profile does not contain.
+- This describes the human, not you. "I", "me" and "my" from the user refer to
+  this profile. "You" and "your" refer to your own SOUL and IDENTITY. A question
+  about what the user likes is never a question about what you like.''';
   }
 
   static String _asBulletList(List<String> values) {

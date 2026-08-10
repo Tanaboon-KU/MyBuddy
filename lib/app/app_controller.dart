@@ -363,9 +363,17 @@ class AppController extends AssistantRuntimeController {
 
     try {
       final memoryData = await memory.loadMemoryData();
+      // T-12: the USER profile is composed last, after the tool blocks, rather
+      // than inline a quarter of the way through the prompt. See
+      // MemoryService.buildUserPromptTail for what E4 measured and why
+      // position is the lever being pulled.
       final systemPrompt = await memory.buildSystemPrompt(
         memory: memoryData,
         lockedFields: await memory.loadLockedFields(),
+        includeUserBlock: false,
+      );
+      final userPromptTail = await memory.buildUserPromptTail(
+        memory: memoryData,
       );
 
       _conversation.add(_createMessage('user', userText));
@@ -374,6 +382,7 @@ class AppController extends AssistantRuntimeController {
       final assistant = await llm.generateChat(
         systemText: systemPrompt,
         userText: userText,
+        trailingSystemText: userPromptTail,
       );
 
       _conversation.add(_createMessage('assistant', assistant));

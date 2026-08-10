@@ -274,11 +274,25 @@ class LlmService {
     }
   }
 
-  String _composeSystemText(String systemText, String toolsInstruction) {
-    final base = systemText.trim();
-    if (toolsInstruction.isEmpty) return base;
-    if (base.isEmpty) return toolsInstruction;
-    return '$base\n\n$toolsInstruction';
+  /// [trailing] goes after the tool blocks, which is the point of it — T-12.
+  ///
+  /// The USER profile used to sit inline in the memory block, a quarter of the
+  /// way in, with ~5,500 characters of tool definitions between it and the
+  /// generation point. T-26 established that this model reproduces whatever is
+  /// nearest that point, so position is the one lever it demonstrably responds
+  /// to. Empty by default, so every caller that does not ask for this composes
+  /// exactly as before.
+  String _composeSystemText(
+    String systemText,
+    String toolsInstruction, {
+    String trailing = '',
+  }) {
+    final parts = <String>[
+      systemText.trim(),
+      toolsInstruction.trim(),
+      trailing.trim(),
+    ]..removeWhere((p) => p.isEmpty);
+    return parts.join('\n\n');
   }
 
   /// Messages actually replayed by the last [_replayCanonicalDialogue].
@@ -408,6 +422,7 @@ class LlmService {
   Future<String> generateChat({
     String? systemText,
     required String userText,
+    String trailingSystemText = '',
   }) async {
     return _runExclusive(() async {
       final model = await _ensureModel();
@@ -426,6 +441,7 @@ class LlmService {
       final composedSystemText = _composeSystemText(
         systemText ?? '',
         toolsInstruction,
+        trailing: trailingSystemText,
       );
       _lastComposedSystemText = composedSystemText;
 
