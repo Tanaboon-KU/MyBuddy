@@ -53,12 +53,20 @@ void main() {
     );
   }
 
-  test('an accepted write says it saved', () async {
+  test('an accepted write names what it saved', () async {
+    // Not a bare "Saved.". E3 L_P07 called update_assistant_soul with the
+    // default mission text lifted from its own prompt, was told "Saved.", and
+    // announced to the user that it had added a licensed doctor to their
+    // profile — E2 pair 6 has the same fingerprint. "Saved." is true and says
+    // nothing about what, so no text in context contradicts an invented
+    // answer.
     final result = await setVoice('Sarcastic');
 
     expect(result.isSuccess, isTrue);
     expect(result.data['saved'], isTrue);
-    expect(result.data['outcome'], 'Saved.');
+    final outcome = result.data['outcome']! as String;
+    expect(outcome, contains('identity.voice'));
+    expect(outcome, contains('Sarcastic'));
     expect((await memory.loadMemoryData()).identity.voice, contains('Sarcastic'));
   });
 

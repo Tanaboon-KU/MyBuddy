@@ -233,7 +233,12 @@ final class ToolRegistry {
 
     return <String, Object?>{
       'saved': saved,
-      'outcome': _writeOutcome(result, locked: locked, saved: saved),
+      'outcome': _writeOutcome(
+        result,
+        locked: locked,
+        saved: saved,
+        wrote: _describeWrites(toolName, arguments),
+      ),
       'status': result.status.name,
       'applied_count': result.appliedCount,
       'rejected_count': result.rejectedCount,
@@ -268,10 +273,37 @@ final class ToolRegistry {
   ///
   /// The machine fields stay exactly as they were. This changes what the model
   /// reads, not what the turn log records, so E3's scoring is unaffected.
+  /// The writes as the model asked for them, `section.field = value`.
+  ///
+  /// Only meaningful when everything asked for was accepted, which is why the
+  /// caller passes it and [_writeOutcome] only uses it in that branch.
+  static String _describeWrites(
+    String toolName,
+    Map<String, dynamic> arguments,
+  ) {
+    final section = switch (toolName) {
+      'update_assistant_soul' => 'soul',
+      'update_assistant_identity' => 'identity',
+      _ => 'user',
+    };
+    final updates = arguments['updates'];
+    if (updates is! List) return '';
+    final parts = <String>[];
+    for (final update in updates) {
+      if (update is! Map) continue;
+      final field = update['field'];
+      final value = update['value'] ?? update['values'];
+      if (field == null) continue;
+      parts.add(value == null ? '$section.$field' : '$section.$field = $value');
+    }
+    return parts.join('; ');
+  }
+
   static String _writeOutcome(
     MemoryUpdateResult result, {
     required List<String> locked,
     required bool saved,
+    String wrote = '',
   }) {
     if (locked.isNotEmpty) {
       final fields = locked.join(', ');
@@ -291,7 +323,18 @@ final class ToolRegistry {
       return 'Saved ${result.appliedCount} change(s). '
           '${result.rejectedCount} were not accepted.';
     }
-    return 'Saved.';
+    // Naming the write, rather than a bare "Saved.", because E3 showed the
+    // model describing a save that did not match what it had asked for. L_P07
+    // called update_assistant_soul with the default mission text copied out of
+    // its own prompt, got "Saved.", and told the user it had added a licensed
+    // doctor to their profile - the same fingerprint as E2 pair 6. "Saved." is
+    // true and says nothing about what, so nothing in context contradicts an
+    // invented answer. Spelling it out puts the actual value in front of the
+    // model at the moment it composes the reply.
+    return wrote.isEmpty
+        ? 'Saved.'
+        : 'Saved $wrote. Describe only this to the user; do not describe any '
+              'other change.';
   }
 }
 
