@@ -18,8 +18,18 @@ class _StubExtractionLlm extends LlmService {
 
   final String response;
 
+  // Both, so the test keeps testing what it is about. T-26 moved the automatic
+  // pass from the three-section prompt to the USER-only one; which prompt it
+  // uses is not what this file is checking, and stubbing only the old entry
+  // point would have made these fail for a reason unrelated to rawOutput.
   @override
   Future<String> extractMemoryFromChat(
+    String currentMemoryJson, {
+    Set<String> lockedFields = const <String>{},
+  }) async => response;
+
+  @override
+  Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {
     Set<String> lockedFields = const <String>{},
   }) async => response;

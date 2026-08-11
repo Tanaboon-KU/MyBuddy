@@ -1465,8 +1465,33 @@ class MemoryService {
 
     String rawResponse;
     try {
-      rawResponse = await llm.extractMemoryFromChat(
-        before.toJsonString(),
+      // T-26: the USER-only pass, not the three-section one.
+      //
+      // Fifteen runs established the failure is not wording. What the model
+      // does across all three promptings tried is reproduce whatever JSON sits
+      // nearest the generation point, and it cannot separate its instructions
+      // from the conversation it is meant to analyse. The routing decision -
+      // "which of soul, identity or user does this belong to" - is part of what
+      // it is being asked to get right, and config C's output shows it failing
+      // exactly there: it wrote the extraction prompt's own opening line into
+      // user.goals and its own name into identity.assistant_name.
+      //
+      // A user-only pass removes that decision. The section is implied, the
+      // field list is a fifth of the size, and `allowedSections` below refuses
+      // anything else even if the model names one.
+      //
+      // T-26 listed this option but weighed it against "3 calls instead of 1,
+      // and each one costs a session rebuild through T-21". That objection has
+      // gone: it is one call, not three, because the paper's claim is about
+      // user facts, and T-21 is fixed - the rebuild now happens once per turn
+      // regardless of how many extraction passes ran.
+      //
+      // Soul and identity are not left unwritable: E3 measured the model
+      // writing both through the tool-call path during ordinary chat, which is
+      // untouched. What stops is the automatic pass trying to guess a section.
+      final currentUser = await loadUserMemoryData();
+      rawResponse = await llm.extractUserMemoryFromChat(
+        jsonEncode(currentUser.toJson()),
         lockedFields: await loadLockedFields(),
       );
     } on MemoryExtractionTimeoutException catch (e) {
@@ -1518,7 +1543,13 @@ class MemoryService {
     }
 
     final patches = _parseExtractedMemoryPatches(rawResponse);
-    final result = await applyMemoryPatches(patches);
+    // Belt and braces with the prompt: a patch naming soul or identity is
+    // rejected rather than applied, so a model that ignores the narrowed
+    // instructions still cannot write outside the layer this pass is for.
+    final result = await applyMemoryPatches(
+      patches,
+      allowedSections: const <String>{'user'},
+    );
     final rejectionCodes = result.rejections
         .map((r) => '${r.section}.${r.field}:${r.code.name}')
         .toList(growable: false);
