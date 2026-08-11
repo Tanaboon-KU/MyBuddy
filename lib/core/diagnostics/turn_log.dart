@@ -65,6 +65,7 @@ class TurnLogEntry {
     this.sessionRebuilt,
     this.replayedMessageCount,
     this.toolsExposed = const <String>[],
+    this.toolCalls = const <String>[],
     this.extractStartMs,
     this.extractEndMs,
     this.extractParseResult = ExtractionParseResult.notRun,
@@ -113,6 +114,18 @@ class TurnLogEntry {
   /// by 1,040 characters and invalidates a cross-run prompt comparison.
   final List<String> toolsExposed;
 
+  /// The tools the model actually called this turn, and how each ended, as
+  /// `name:ok` or `name:<errorCode>`. Empty means it called nothing.
+  ///
+  /// [toolsExposed] says what was on offer; this says what was used, and the
+  /// two answer different questions. E3 scores whether a reply claims a
+  /// persona change that never reached memory, and until now that had to be
+  /// argued from the reply text alone: an empty memory dump is the same
+  /// whether the model was refused or never tried. T-25 L_P06 is the second
+  /// case and the E3 re-run's P3 row is the first, and the log could not tell
+  /// them apart.
+  final List<String> toolCalls;
+
   /// Reply finished and extraction was triggered.
   final int? extractStartMs;
 
@@ -155,6 +168,7 @@ class TurnLogEntry {
     bool? sessionRebuilt,
     int? replayedMessageCount,
     List<String>? toolsExposed,
+    List<String>? toolCalls,
     int? extractStartMs,
     int? extractEndMs,
     ExtractionParseResult? extractParseResult,
@@ -182,6 +196,7 @@ class TurnLogEntry {
       sessionRebuilt: sessionRebuilt ?? this.sessionRebuilt,
       replayedMessageCount: replayedMessageCount ?? this.replayedMessageCount,
       toolsExposed: toolsExposed ?? this.toolsExposed,
+      toolCalls: toolCalls ?? this.toolCalls,
       extractStartMs: extractStartMs ?? this.extractStartMs,
       extractEndMs: extractEndMs ?? this.extractEndMs,
       extractParseResult: extractParseResult ?? this.extractParseResult,
@@ -214,6 +229,7 @@ class TurnLogEntry {
     'session_rebuilt',
     'replayed_message_count',
     'tools_exposed',
+    'tool_calls',
     'extract_start_ms',
     'extract_end_ms',
     'extract_total_ms',
@@ -245,6 +261,7 @@ class TurnLogEntry {
       _boolValue(sessionRebuilt),
       replayedMessageCount,
       toolsExposed.join('|'),
+      toolCalls.join('|'),
       extractStartMs,
       extractEndMs,
       extractTotalMs,

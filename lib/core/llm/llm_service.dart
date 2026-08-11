@@ -520,7 +520,7 @@ class LlmService {
           }
 
           stage = _GenerationStage.generating;
-          final result = await ToolOrchestrator(
+          final orchestrator = ToolOrchestrator(
             chat: InferenceToolLoopChat(
               _chat!,
               generationTimeout: _chatGenerationTimeout,
@@ -530,7 +530,8 @@ class LlmService {
             ),
             collector: ModelTurnCollector(modelType: modelType),
             tools: toolSnapshot,
-          ).run();
+          );
+          final result = await orchestrator.run();
 
           _lastGenerationTelemetry = ChatGenerationTelemetry(
             replyStartMs: replyStartMs,
@@ -543,6 +544,7 @@ class LlmService {
             toolsExposed: toolSnapshot.definitions
                 .map((t) => t.name)
                 .toList(growable: false),
+            toolCalls: orchestrator.executedCalls,
           );
 
           _canonicalDialogue.add(canonicalUserMessage);
@@ -951,6 +953,7 @@ class ChatGenerationTelemetry {
     required this.sessionRebuilt,
     required this.replayedMessageCount,
     this.toolsExposed = const <String>[],
+    this.toolCalls = const <String>[],
   });
 
   final int replyStartMs;
@@ -984,6 +987,14 @@ class ChatGenerationTelemetry {
   /// rebuild. This column is how that gets caught rather than inferred from a
   /// jump in `sys_prompt_chars`.
   final List<String> toolsExposed;
+
+  /// The tools the model actually called, and how each one ended, as
+  /// `name:ok` or `name:<errorCode>`. Empty when it called nothing.
+  ///
+  /// [toolsExposed] answers what was on offer; this answers what was used.
+  /// Without it a reply claiming a memory write is indistinguishable from one
+  /// backed by a refused call, which is the open half of T-25.
+  final List<String> toolCalls;
 
   int get totalMs => replyEndMs - replyStartMs;
 }

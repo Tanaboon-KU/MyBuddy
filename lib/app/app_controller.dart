@@ -489,6 +489,7 @@ class AppController extends AssistantRuntimeController {
         sessionRebuilt: telemetry?.sessionRebuilt,
         replayedMessageCount: telemetry?.replayedMessageCount,
         toolsExposed: telemetry?.toolsExposed ?? const <String>[],
+        toolCalls: telemetry?.toolCalls ?? const <String>[],
         prevExtractionStillRunning: prevExtractionStillRunning,
         batteryTempC: batteryStatus.temperatureC,
         batteryPct: batteryStatus.percent,

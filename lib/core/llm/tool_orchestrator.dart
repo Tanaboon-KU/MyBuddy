@@ -47,6 +47,24 @@ final class ToolOrchestrator {
   final Map<String, ToolExecutionResult> _resultLedger =
       <String, ToolExecutionResult>{};
 
+  /// Every distinct call that actually reached the registry this turn, in the
+  /// order it was first executed, as `name:ok` or `name:<errorCode>`.
+  ///
+  /// The turn log recorded which tools were *offered* and never which were
+  /// *called*, so "tried to write and was refused" and "claimed a write it
+  /// never attempted" produced identical rows. E3 has to tell those apart:
+  /// T-25 L_P06 is a reply claiming an action with no call behind it, and the
+  /// E3 re-run's P3 row blames an invalid argument without saying which. Both
+  /// were diagnosed by reading replies because the log could not answer.
+  ///
+  /// Distinct rather than every attempt, keyed off the same ledger the
+  /// duplicate-call guard uses, so a model that repeats one call in a loop
+  /// leaves one entry and not forty.
+  List<String> get executedCalls => <String>[
+    for (final result in _resultLedger.values)
+      '${result.name}:${result.errorCode?.name ?? 'ok'}',
+  ];
+
   Future<String> run() async {
     final runId = _runIdFactory();
     var modelRound = 0;
