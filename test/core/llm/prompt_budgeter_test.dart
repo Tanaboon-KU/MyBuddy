@@ -24,6 +24,31 @@ void main() {
     );
   });
 
+  test('a buffer that swallows the window falls back to a usable reserve', () {
+    // Gemma3-1B-IT ships tokenBuffer 4096 against maxTokens 4096. The rescue
+    // branch matched only the exact value maxTokens - 512, so this entry fell
+    // through to clamp(1, maxTokens - 1) and produced a 4,095-token reserve:
+    // inputLimit 1. Every prompt longer than a single token threw
+    // inputTooLong, so that model could not hold a conversation at all - a
+    // catalogue value, not a capability of the model.
+    expect(
+      budgeter.effectiveTokenBuffer(
+        maxTokens: 4096,
+        configuredTokenBuffer: 4096,
+      ),
+      512,
+    );
+    // A reserve that takes at least half the window is not a reserve. 2048
+    // would leave as much room for the answer as for everything being asked.
+    expect(
+      budgeter.effectiveTokenBuffer(
+        maxTokens: 4096,
+        configuredTokenBuffer: 2048,
+      ),
+      512,
+    );
+  });
+
   test('accounts for system history user and template reserve', () async {
     final platform = FakeLlmPlatform();
     final model = await platform.getActiveModel(
