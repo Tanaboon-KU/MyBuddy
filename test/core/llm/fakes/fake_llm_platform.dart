@@ -22,6 +22,10 @@ class FakeLlmPlatform implements LlmPlatform {
   bool failNextAddQuery = false;
   bool failAfterAccept = false;
 
+  /// Makes session close throw the way MediaPipe does when the native
+  /// invocation is still running - what an aborted extraction leaves behind.
+  bool failSessionClose = false;
+
   Completer<void>? generationCompleter;
 
   List<String> acceptedQueries = [];
@@ -218,6 +222,11 @@ class FakeInferenceModelSession implements InferenceModelSession {
 
   @override
   Future<void> close() async {
+    if (platform.failSessionClose) {
+      throw StateError(
+        'Previous invocation still processing. Wait for done=true.',
+      );
+    }
     isClosed = true;
     platform.closeSessionCount++;
   }

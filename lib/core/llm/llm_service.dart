@@ -90,6 +90,21 @@ class LlmService {
   /// Set once an extraction pass has generated on this model, cleared when the
   /// chat session is rebuilt. See [_chatSurvivesExtraction].
   bool _extractionTouchedTheModel = false;
+
+  /// An extraction session that would not close, so the native invocation
+  /// behind it is still running and the engine cannot be trusted.
+  ///
+  /// Measured with a six-turn conversation: the pass aborted, `close()` threw
+  /// `Previous invocation still processing`, the throw was swallowed, and the
+  /// NEXT pass died inside the plugin's `createSession` - which closes the
+  /// previous session before making a new one. Two runs of three, and the
+  /// failure surfaced a pass away from its cause.
+  ///
+  /// Reloading the model is the only thing that clears it, so this is a flag
+  /// rather than a reload on the spot: the reload costs seconds and heat, and
+  /// doing it inside the failing pass would charge them to whatever chat turn
+  /// happens to be waiting.
+  bool _nativeSessionWedged = false;
   final List<Message> _canonicalDialogue = <Message>[];
 
   /// What the user themselves typed this session, one entry per turn, in order.
@@ -186,6 +201,27 @@ class LlmService {
     return error.toString().toLowerCase().contains('session not created');
   }
 
+  /// Drops the engine without dropping the conversation.
+  ///
+  /// [_resetNativeState] also clears [_canonicalDialogue], which is right when
+  /// the app is tearing down or swapping models and wrong here: the engine is
+  /// being replaced because an extraction session wedged, and what the user
+  /// said is not implicated. Clearing it turned the crash into a pass that ran
+  /// in 1ms against an empty conversation and stored nothing - quieter, and
+  /// just as broken. The next chat turn rebuilds the session and replays the
+  /// dialogue through the path that already exists for T-21.
+  Future<void> _reloadEngineKeepingDialogue() async {
+    final model = _model;
+    _chat = null;
+    _model = null;
+    _systemFingerprint = null;
+    if (model != null) {
+      try {
+        await model.close();
+      } catch (_) {}
+    }
+  }
+
   Future<void> _resetNativeState() async {
     final model = _model;
     _chat = null;
@@ -253,6 +289,14 @@ class LlmService {
   }
 
   Future<InferenceModel> _ensureModel() async {
+    if (_nativeSessionWedged) {
+      debugPrint(
+        'LlmService: an extraction session never closed; reloading the model '
+        'before using it again',
+      );
+      _nativeSessionWedged = false;
+      await _reloadEngineKeepingDialogue();
+    }
     if (_model != null) return _model!;
 
     debugPrint(
@@ -694,7 +738,21 @@ class LlmService {
           sinceGuardCheck += chunk.length;
           if (sinceGuardCheck >= 50) {
             sinceGuardCheck = 0;
-            if (_repetitionGuard.hasCollapsed(responseBuffer.toString())) {
+            // Both, either one ends the pass.
+            //
+            // The trigram test was taken off this path for a while, on the
+            // reading that it misjudged structured output - it aborts at 158
+            // characters here, and a correct two-patch JSON extraction scores
+            // 0.63 against its 0.70 threshold. Logging the aborted text settled
+            // it: what it was stopping was real degeneration, the model echoing
+            // the transcript back and looping on one phrase. Taking it off
+            // bought 10 more seconds of that and the same empty result.
+            //
+            // The two-patch risk is real but latent, and this is not the place
+            // to trade a working check against it.
+            final sofar = responseBuffer.toString();
+            if (_repetitionGuard.hasCollapsed(sofar) ||
+                RepetitionGuard.extractionHasStalled(sofar)) {
               abortReason = 'repetition';
               break;
             }
@@ -710,6 +768,17 @@ class LlmService {
             'EXTRACTION_ABORTED reason=$abortReason chars=${raw.length} '
             'ms=${elapsed.inMilliseconds}',
           );
+          // What it was repeating, not just that it repeated. Three rounds of
+          // diagnosis on the handset stalled here: the reason and the length
+          // are the same whichever check fired and whatever the model wrote, so
+          // neither could say whether the guard had misjudged a good answer or
+          // caught a real stall. The abort throws the text away, so if it is
+          // not logged now it is gone.
+          for (final line in const LineSplitter().convert(
+            raw.length > 400 ? raw.substring(raw.length - 400) : raw,
+          )) {
+            debugPrint('EXTRACTION_ABORTED_TAIL| $line');
+          }
           throw MemoryExtractionAbortedException(
             abortReason,
             elapsed,
@@ -730,7 +799,17 @@ class LlmService {
         _extractionTouchedTheModel = true;
         try {
           await session.close().timeout(const Duration(seconds: 5));
-        } catch (_) {}
+        } catch (e) {
+          // Swallowing this is what let one failed pass break the next one.
+          // The session is still generating natively and nothing here can stop
+          // it, so the engine is marked unusable and rebuilt before its next
+          // use instead.
+          debugPrint(
+            'LlmService: extraction session would not close, so the model is '
+            'now stale and will be reloaded: $e',
+          );
+          _nativeSessionWedged = true;
+        }
       }
     });
   }

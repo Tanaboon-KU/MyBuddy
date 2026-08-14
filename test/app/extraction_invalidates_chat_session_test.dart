@@ -126,7 +126,10 @@ void main() {
     await app.chatOnce('first');
     final before = platform.createChatCount;
 
-    platform.asyncResponseBatches.add(List<String>.filled(100, '!%'));
+    // A repeated answer rather than the `!%` runaway: the extraction path now
+    // aborts on a repeated line, and leaves a single unbroken line to the
+    // character ceiling. Either ends the pass; this one ends it in three lines.
+    platform.asyncResponseBatches.add(List<String>.filled(20, 'name: Nott\n'));
     await expectLater(
       llm.extractMemoryFromChat('{}'),
       throwsA(isA<MemoryExtractionAbortedException>()),

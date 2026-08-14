@@ -96,4 +96,32 @@ final class RepetitionGuard {
     final ratio = distinctRatio(text);
     return ratio != null && ratio < minDistinctRatio;
   }
+
+  /// Whether an extraction pass has started repeating itself.
+  ///
+  /// [hasCollapsed] cannot be used on extraction output and the handset proved
+  /// it: a six-turn conversation aborted three runs running at 158 characters,
+  /// `reason=repetition`, on an answer that was not a runaway. Distinct-trigram
+  /// diversity was measured against chat replies - prose, 0.77 to 1.00 - and
+  /// nothing in that sample had a shape. Structured output repeats field names
+  /// because it is correct, not because it has collapsed. The JSON the pass
+  /// used to ask for scores 0.63 as soon as it carries two patches, so the same
+  /// test would have killed a correct two-patch extraction; that never showed
+  /// up only because the model never produced two.
+  ///
+  /// What actually goes wrong here is the answer arriving again and again, so
+  /// that is what this looks for: one line, three times. A single enormous line
+  /// - the `!%` runaway of E1 block 2 - is left to `extractionCharLimit`, which
+  /// is what ended it before this existed.
+  static bool extractionHasStalled(String text) {
+    final counts = <String, int>{};
+    for (final raw in text.split('\n')) {
+      final line = raw.trim();
+      if (line.isEmpty) continue;
+      final seen = (counts[line] ?? 0) + 1;
+      if (seen >= 3) return true;
+      counts[line] = seen;
+    }
+    return false;
+  }
 }

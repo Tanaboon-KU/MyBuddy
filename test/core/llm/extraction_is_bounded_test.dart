@@ -54,9 +54,15 @@ void main() {
     await app.chatOnce('I am cutting down on coffee');
   });
 
-  test('stops a pass whose output has collapsed into repetition', () async {
-    // The shape of the real 5,438-character runaway, in the fake's chunks.
-    platform.asyncResponseBatches.add(List<String>.filled(100, '!%'));
+  test('stops a pass that repeats its answer', () async {
+    // What going wrong looks like on this path. The reply-side trigram guard
+    // used to sit here and had to be taken off it: on the handset it aborted a
+    // six-turn pass at 158 characters, reason=repetition, on an answer that was
+    // not a runaway, and it scores a correct two-patch JSON extraction at 0.63.
+    // Its threshold was measured on prose replies, which have no shape.
+    platform.asyncResponseBatches.add(
+      List<String>.filled(20, 'name: Nott\n'),
+    );
 
     await expectLater(
       llm.extractMemoryFromChat('{}'),
@@ -67,18 +73,39 @@ void main() {
     );
   });
 
-  test('cuts the pass off before it consumes everything on offer', () async {
-    // The point of the exercise: not that it fails, it failed before too, but
-    // that it stops early. 200 characters were on offer and the guard needs
-    // 120 before it will judge anything, so it should land between the two.
-    platform.asyncResponseBatches.add(List<String>.filled(100, '!%'));
+  test('cuts a repeating pass off early', () async {
+    // The point of the exercise: not that it fails, but that it stops before
+    // consuming everything on offer. 220 characters are queued and three
+    // identical lines is 33.
+    platform.asyncResponseBatches.add(
+      List<String>.filled(20, 'name: Nott\n'),
+    );
 
     try {
       await llm.extractMemoryFromChat('{}');
       fail('expected the pass to be aborted');
     } on MemoryExtractionAbortedException catch (e) {
-      expect(e.chars, greaterThanOrEqualTo(120));
-      expect(e.chars, lessThan(200));
+      expect(e.chars, lessThan(220));
+    }
+  });
+
+  test('a single runaway line is still caught early', () async {
+    // The 5,438-character `!%` output of E1 block 2 has no newlines, so the
+    // repeated-line test cannot see it - the trigram test is what stops this
+    // one, and it is why that test is still on this path. Taking it off left
+    // the pass running ten seconds longer on the handset for the same nothing.
+    platform.asyncResponseBatches.add(List<String>.filled(2000, '!%'));
+
+    try {
+      await llm.extractMemoryFromChat('{}');
+      fail('expected the pass to be aborted');
+    } on MemoryExtractionAbortedException catch (e) {
+      expect(e.reason, 'repetition');
+      expect(
+        e.chars,
+        lessThan(400),
+        reason: 'stopping early is the whole point; 4,000 were on offer',
+      );
     }
   });
 
