@@ -1463,6 +1463,7 @@ class MemoryService {
   /// `extract_raw_output`, `memory_changed` and `layers_changed`.
   Future<MemoryExtractionOutcome> updateMemoryFromChat({
     required LlmService llm,
+    bool reAskAllTurns = false,
   }) async {
     final before = await loadMemoryData();
 
@@ -1496,6 +1497,7 @@ class MemoryService {
       rawResponse = await llm.extractUserMemoryFromChat(
         jsonEncode(currentUser.toJson()),
         lockedFields: await loadLockedFields(),
+        reAskAllTurns: reAskAllTurns,
       );
     } on MemoryExtractionTimeoutException catch (e) {
       debugPrint('MemoryService: extraction timed out: $e');

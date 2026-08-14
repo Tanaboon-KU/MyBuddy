@@ -92,6 +92,13 @@ class LlmService {
   bool _extractionTouchedTheModel = false;
   final List<Message> _canonicalDialogue = <Message>[];
 
+  /// How far through [_canonicalDialogue] extraction has already asked.
+  int _extractedThroughIndex = 0;
+
+  /// Most turns one extraction pass will ask about. Each is its own model call,
+  /// so this is the ceiling on what a single pass costs.
+  static const int maxTurnsPerExtraction = 10;
+
   /// What the user themselves typed this session, one entry per turn, in order.
   ///
   /// Read from the canonical dialogue rather than the replayed one, so it is
@@ -192,6 +199,7 @@ class LlmService {
     _model = null;
     _systemFingerprint = null;
     _canonicalDialogue.clear();
+    _extractedThroughIndex = 0;
     if (model != null) {
       try {
         await model.close();
@@ -817,21 +825,81 @@ class LlmService {
     return _runExclusiveMemoryExtraction(prompt);
   }
 
+  /// [reAskAllTurns] ignores what earlier passes have already asked about.
+  ///
+  /// Set by the operator's "force extraction now", which means ask again - and
+  /// by the measurement harness, which drains the automatic pass before forcing
+  /// one of its own and would otherwise measure a pass with nothing left to do.
   Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {
     Set<String> lockedFields = const <String>{},
+    bool reAskAllTurns = false,
   }) async {
-    final conversationText = _formatHistoryForMemory(_canonicalDialogue);
-    if (conversationText.isEmpty) {
-      return '';
-    }
-
-    final prompt = _buildUserMemoryPrompt(
-      conversationText,
-      currentMemoryJson,
-      lockedFields,
+    // One question per sentence. Asking about the whole conversation at once
+    // made five facts compete for five field slots, and 24 runs lost the same
+    // one every time - see MemoryExtractionPromptBuilder.buildUserTurn.
+    //
+    // Incremental as a side effect worth having: a turn already asked about is
+    // not asked about again, which is what T-08 item 4 wanted. The marker only
+    // moves when the whole pass completes, so a pass that throws part way
+    // through is retried rather than silently skipping what it had reached.
+    final turns = _userTurnsAwaitingExtraction(fromStart: reAskAllTurns);
+    // A pass that asks about nothing and a pass that asks and gets nothing look
+    // identical from the outside - both end as an empty response - so say which
+    // this was. T-09's point, applied to the trigger rather than the result.
+    debugPrint(
+      'LlmService: extraction pass asking about ${turns.length} turn(s); '
+      'dialogue=${_canonicalDialogue.length} '
+      'alreadyAsked=$_extractedThroughIndex '
+      'instance=${identityHashCode(this)}',
     );
-    return _runExclusiveMemoryExtraction(prompt);
+    if (turns.isEmpty) return '';
+
+    final answers = <String>[];
+    for (final turn in turns) {
+      final answer = await _runExclusiveMemoryExtraction(
+        _memoryExtractionPromptBuilder.buildUserTurn(
+          turn: turn,
+          currentMemory: currentMemoryJson,
+          lockedFields: lockedFields,
+        ),
+      );
+      if (answer.trim().isNotEmpty) answers.add(answer.trim());
+    }
+    _extractedThroughIndex = _canonicalDialogue.length;
+    debugPrint(
+      'LlmService: extraction pass done, marker now $_extractedThroughIndex '
+      'instance=${identityHashCode(this)}',
+    );
+
+    // One answer per line, which is what ExtractionLineFormat already reads,
+    // and a field named by two turns becomes two values rather than one
+    // overwriting the other.
+    return answers.join('\n');
+  }
+
+  /// The user's turns that no extraction pass has been given yet.
+  ///
+  /// Bounded so a long conversation cannot turn one pass into fifty model
+  /// calls. The bound drops the oldest, and says so in the log rather than
+  /// quietly - a silent cap here would look exactly like extraction failing.
+  List<String> _userTurnsAwaitingExtraction({bool fromStart = false}) {
+    final fresh = <String>[];
+    final start = fromStart ? 0 : _extractedThroughIndex;
+    for (var i = start; i < _canonicalDialogue.length; i++) {
+      final message = _canonicalDialogue[i];
+      if (!message.isUser) continue;
+      if (message.type != MessageType.text || message.hasImage) continue;
+      final text = message.text.trim();
+      if (text.isNotEmpty) fresh.add(text);
+    }
+    if (fresh.length <= maxTurnsPerExtraction) return fresh;
+    debugPrint(
+      'LlmService: ${fresh.length} turns awaiting extraction, asking about '
+      'the most recent $maxTurnsPerExtraction and dropping '
+      '${fresh.length - maxTurnsPerExtraction}',
+    );
+    return fresh.sublist(fresh.length - maxTurnsPerExtraction);
   }
 
   static String _formatHistoryForMemory(List<Message> history) {
@@ -931,6 +999,8 @@ class LlmService {
     return _runExclusive(() async {
       final discarded = _canonicalDialogue.length;
       _canonicalDialogue.clear();
+      _extractedThroughIndex = 0;
+      debugPrint('LlmService.startNewConversation: marker reset, instance=${identityHashCode(this)}');
       _systemFingerprint = null;
 
       final chat = _chat;

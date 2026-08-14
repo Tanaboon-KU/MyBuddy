@@ -614,7 +614,7 @@ class AppController extends AssistantRuntimeController {
     final startMs = DateTime.now().millisecondsSinceEpoch;
     MemoryExtractionOutcome outcome;
     try {
-      outcome = await memory.updateMemoryFromChat(llm: llm);
+      outcome = await memory.updateMemoryFromChat(llm: llm, reAskAllTurns: forced);
     } catch (e) {
       debugPrint('AppController: extraction threw: $e');
       outcome = MemoryExtractionOutcome(

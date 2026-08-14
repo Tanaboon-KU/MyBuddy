@@ -42,6 +42,7 @@ class _StubExtractionLlm extends LlmService {
   Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {
     Set<String> lockedFields = const <String>{},
+    bool reAskAllTurns = false,
   }) async => response;
 }
 

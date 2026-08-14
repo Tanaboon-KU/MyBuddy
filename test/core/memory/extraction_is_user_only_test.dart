@@ -53,6 +53,7 @@ class _StubLlm extends LlmService {
   Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {
     Set<String> lockedFields = const <String>{},
+    bool reAskAllTurns = false,
   }) async {
     userCalls++;
     return response;

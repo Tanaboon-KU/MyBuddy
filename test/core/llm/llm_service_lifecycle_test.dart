@@ -362,7 +362,12 @@ void main() {
         calendarGateway.requests.single.startTime,
         DateTime(2026, 7, 2, 16),
       );
-      expect(fakePlatform.acceptedQueries.last, contains('User: in two hours'));
+      // The user's own words, without the "User: " transcript prefix: the pass
+      // now asks about one sentence at a time rather than handing over a
+      // formatted conversation. What this test is about is unchanged - the
+      // extraction prompt carries the canonical text and not the runtime
+      // context block, which is the leak it was written to catch.
+      expect(fakePlatform.acceptedQueries.last, contains('in two hours'));
       expect(
         fakePlatform.acceptedQueries.last,
         isNot(contains('<runtime_context>')),
