@@ -510,36 +510,36 @@ class AppController extends AssistantRuntimeController {
   Future<void> _handleMemoryTurnProgress(int turnIndex) async {
     _turnsSinceMemoryUpdate += 1;
 
-    // NOTE: this debounce is RC-1 in ROOT_CAUSE_ANALYSIS.md. Every turn inside
-    // the window cancels and restarts the timer, so a normal back-and-forth
-    // never triggers extraction until the 5-turn threshold. T-08 fixes it;
-    // T-04 only makes the behaviour observable. Do not change the timings here
-    // without the before/after data the protocol requires.
-    if (_turnsSinceMemoryUpdate >= 5) {
-      _memoryIdleTimer?.cancel();
-      _turnsSinceMemoryUpdate = 0;
-      const delay = Duration(seconds: 3);
-      _memoryIdleTimer = Timer(delay, () {
-        unawaited(_updateMemory(turnIndex));
-      });
-      _setExtractionPhase(
-        ExtractionPhase.scheduled,
-        scheduledFor: DateTime.now().add(delay),
-      );
-      return;
-    }
-
+    // This was RC-1's debounce: a minute-long timer restarted by every turn,
+    // with a five-turn threshold that jumped the queue at three seconds. In a
+    // conversation the minute never elapsed, so extraction ran once, when the
+    // user stopped talking.
+    //
+    // T26_lines measured what that costs. A value only reaches `user.facts`
+    // when the user said it in the last turn before the pass runs: the same
+    // allergy sentence is lost at position 3 in three runs and stored at
+    // position 4 in three, everything else held constant. `name`, `traits` and
+    // `goals` come out of any position, facts do not. One pass at the end of a
+    // conversation therefore reads one sentence for facts and throws the rest
+    // away, which is why the occupation was lost in all 51 runs that contained
+    // it - it was never last.
+    //
+    // So the threshold goes and the wait becomes short: every turn gets a pass
+    // in which it is the last thing said. The delay is now for letting a fast
+    // typist's next message land first, not for waiting until they leave.
+    //
+    // The comment this replaces asked for before/after data before touching the
+    // timings. T26_lines is the before, 63 runs of it.
     _memoryIdleTimer?.cancel();
+    _turnsSinceMemoryUpdate = 0;
 
-    const idleDuration = Duration(minutes: 1);
-
-    _memoryIdleTimer = Timer(idleDuration, () {
-      _turnsSinceMemoryUpdate = 0;
+    const delay = Duration(seconds: 3);
+    _memoryIdleTimer = Timer(delay, () {
       unawaited(_updateMemory(turnIndex));
     });
     _setExtractionPhase(
       ExtractionPhase.scheduled,
-      scheduledFor: DateTime.now().add(idleDuration),
+      scheduledFor: DateTime.now().add(delay),
     );
   }
 

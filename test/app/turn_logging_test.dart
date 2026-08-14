@@ -239,15 +239,22 @@ void main() {
       expect(app.extractionScheduledFor, isNull);
     });
 
-    test('the scheduled deadline shows the one-minute debounce (RC-1)',
+    test('the scheduled deadline is short enough to run between turns',
         () async {
       await app.chatOnce('hello');
 
       final remaining = app.extractionScheduledFor!.difference(DateTime.now());
-      // RC-1: a single turn waits a full minute before anything is written.
-      // T-08 will shorten this; if that lands, update this expectation
-      // deliberately rather than letting it drift.
-      expect(remaining.inSeconds, greaterThan(50));
+      // This was "shows the one-minute debounce (RC-1)", and the note on it
+      // asked for the expectation to be changed deliberately if the wait ever
+      // shortened rather than left to drift. It has, so here is the reason.
+      //
+      // T26_lines measured that a value only reaches `user.facts` when the user
+      // said it in the last turn before the pass runs - the same sentence is
+      // lost at position 3 and stored at position 4, three runs each. A minute
+      // restarted by every turn meant one pass per conversation, so one
+      // sentence out of five could reach that field and the rest were gone.
+      // Three seconds gives every turn a pass in which it is the last one.
+      expect(remaining.inSeconds, lessThan(30));
     });
   });
 
