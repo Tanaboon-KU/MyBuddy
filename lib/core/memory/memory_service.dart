@@ -7,6 +7,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../diagnostics/turn_log.dart';
 import '../llm/llm_service.dart';
 import '../llm/memory_tool_semantics.dart';
+import 'extraction_field_routing.dart';
+import 'extraction_grounding.dart';
+import 'extraction_line_format.dart';
 
 abstract final class MemoryStorageKeys {
   static const String memory = 'mybuddy.companion_memory.v3';
@@ -1523,36 +1526,88 @@ class MemoryService {
       );
     }
 
-    final decoded = _decodeExtractedJsonMap(rawResponse);
-    final updates = decoded?['updates'];
-    if (decoded == null || updates is! List) {
+    // T-26 item 1: the pass now asks for lines, so that is read first. The JSON
+    // reader stays behind it because the prompt changed and the model did not -
+    // 32 runs say it reproduces whatever JSON sits nearest the generation
+    // point, and an answer that arrives in the old shape should still land
+    // rather than be recorded as a failure that did not happen.
+    final List<MemoryPatch> patches;
+    if (_lineFormat.hasFieldLines(rawResponse)) {
+      final lines = _lineFormat.parse(rawResponse);
+      if (lines.isEmpty) {
+        // Every field answered NONE: the user revealed nothing this turn.
+        return MemoryExtractionOutcome(
+          parseResult: ExtractionParseResult.noChange,
+          rawOutput: rawResponse,
+        );
+      }
+      patches = _patchesFromLines(lines);
+    } else {
+      final decoded = _decodeExtractedJsonMap(rawResponse);
+      final updates = decoded?['updates'];
+      if (decoded == null || updates is! List) {
+        debugPrint(
+          'MemoryService: extraction output was neither field lines nor a '
+          'usable "updates" array',
+        );
+        return MemoryExtractionOutcome(
+          parseResult: ExtractionParseResult.failed,
+          rawOutput: rawResponse,
+        );
+      }
+
+      if (updates.isEmpty) {
+        return MemoryExtractionOutcome(
+          parseResult: ExtractionParseResult.noChange,
+          rawOutput: rawResponse,
+        );
+      }
+
+      patches = _parseExtractedMemoryPatches(rawResponse);
+    }
+
+    // T-26: a value the user never said does not go in, however well formed the
+    // patch is. Applied here rather than inside applyMemoryPatches because the
+    // tool-call path shares that method, and there the model is writing because
+    // the user asked it to and is expected to paraphrase.
+    final grounded = <MemoryPatch>[];
+    final ungroundedCodes = <String>[];
+    for (final patch in patches) {
+      if (_isGroundedInWhatTheUserSaid(patch, llm.userTurns)) {
+        grounded.add(patch);
+      } else {
+        ungroundedCodes.add(
+          '${patch.section}.${patch.field}:'
+          '${MemoryPatchErrorCode.ungrounded.name}',
+        );
+      }
+    }
+    if (ungroundedCodes.isNotEmpty) {
       debugPrint(
-        'MemoryService: extraction output had no usable "updates" array',
-      );
-      return MemoryExtractionOutcome(
-        parseResult: ExtractionParseResult.failed,
-        rawOutput: rawResponse,
+        'MemoryService: dropped ${ungroundedCodes.length} patch(es) not '
+        'grounded in the user\'s own turns: ${ungroundedCodes.join(', ')}',
       );
     }
 
-    if (updates.isEmpty) {
+    if (grounded.isEmpty) {
       return MemoryExtractionOutcome(
-        parseResult: ExtractionParseResult.noChange,
+        parseResult: ExtractionParseResult.rejected,
         rawOutput: rawResponse,
+        rejectionCodes: ungroundedCodes,
       );
     }
 
-    final patches = _parseExtractedMemoryPatches(rawResponse);
     // Belt and braces with the prompt: a patch naming soul or identity is
     // rejected rather than applied, so a model that ignores the narrowed
     // instructions still cannot write outside the layer this pass is for.
     final result = await applyMemoryPatches(
-      patches,
+      grounded,
       allowedSections: const <String>{'user'},
     );
-    final rejectionCodes = result.rejections
-        .map((r) => '${r.section}.${r.field}:${r.code.name}')
-        .toList(growable: false);
+    final rejectionCodes = <String>[
+      ...ungroundedCodes,
+      ...result.rejections.map((r) => '${r.section}.${r.field}:${r.code.name}'),
+    ];
 
     if (result.appliedCount == 0) {
       // The failure mode RC-2 predicts. Loud, because the old code path was
@@ -1581,6 +1636,61 @@ class MemoryService {
       layersChanged: _changedLayers(before, after),
       rejectionCodes: rejectionCodes,
     );
+  }
+
+  static const ExtractionGrounding _grounding = ExtractionGrounding();
+  static const ExtractionLineFormat _lineFormat = ExtractionLineFormat();
+  static const ExtractionFieldRouting _routing = ExtractionFieldRouting();
+
+  /// Turns the answered lines into patches for the user layer.
+  ///
+  /// `name` is a single value, so answering it replaces what is there. The list
+  /// fields add, which leaves removal to the tool-call path where the user has
+  /// actually asked for it - an automatic pass that could delete what it did
+  /// not recognise this turn would empty the layer over a few turns.
+  static List<MemoryPatch> _patchesFromLines(Map<String, List<String>> lines) {
+    final patches = <MemoryPatch>[];
+    for (final entry in lines.entries) {
+      for (final value in entry.value) {
+        // The model finds the fact; this decides where it goes. See
+        // [ExtractionFieldRouting] - eighteen runs filed an allergy under
+        // preferences, including six where the prompt said not to.
+        final field = _routing.fieldFor(entry.key, value);
+        patches.add(
+          MemoryPatch(
+            section: 'user',
+            field: field,
+            action: field == 'name'
+                ? MemoryPatchActions.set
+                : MemoryPatchActions.add,
+            value: value,
+          ),
+        );
+      }
+    }
+    return patches;
+  }
+
+  /// Whether every value this patch would write came from the user.
+  ///
+  /// `remove` and `clear` introduce no text, so there is nothing to ground -
+  /// blocking them would make a wrong memory harder to correct than to create.
+  /// A patch carrying no value at all is passed through untouched, so that
+  /// [applyMemoryPatches] rejects it under its own code rather than this one.
+  static bool _isGroundedInWhatTheUserSaid(
+    MemoryPatch patch,
+    List<String> userTurns,
+  ) {
+    if (patch.action == MemoryPatchActions.remove ||
+        patch.action == MemoryPatchActions.clear) {
+      return true;
+    }
+    final written = <String>[
+      if (patch.value != null) patch.value!,
+      ...patch.values,
+    ].where((v) => v.trim().isNotEmpty).toList(growable: false);
+    if (written.isEmpty) return true;
+    return written.every((v) => _grounding.isGrounded(v, userTurns));
   }
 
   static List<String> _changedLayers(UserMemory before, UserMemory after) {
@@ -2031,6 +2141,12 @@ enum MemoryPatchErrorCode {
   noEffect,
   persistenceFailed,
   malformedExtraction,
+
+  /// The value did not come from anything the user said. See
+  /// [ExtractionGrounding]; raised by the automatic pass only, never by the
+  /// tool-call path, where the model is writing on the user's instruction and
+  /// is expected to put it in its own words.
+  ungrounded,
 }
 
 class MemoryPatchRejection {

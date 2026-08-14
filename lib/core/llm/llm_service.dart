@@ -92,6 +92,20 @@ class LlmService {
   bool _extractionTouchedTheModel = false;
   final List<Message> _canonicalDialogue = <Message>[];
 
+  /// What the user themselves typed this session, one entry per turn, in order.
+  ///
+  /// Read from the canonical dialogue rather than the replayed one, so it is
+  /// the user's own words without the temporal-context block the model is sent.
+  /// The extraction pass uses it to check that a value it produced came from
+  /// the user at all - see [ExtractionGrounding] - which is only answerable if
+  /// the assistant's turns are excluded, since that is where the invented goal
+  /// in T-26 came from.
+  List<String> get userTurns => _canonicalDialogue
+      .where((m) => m.isUser && m.type == MessageType.text && !m.hasImage)
+      .map((m) => m.text)
+      .where((t) => t.trim().isNotEmpty)
+      .toList(growable: false);
+
   String? _lastComposedSystemText;
 
   /// The exact system instruction most recently handed to the model.
@@ -883,12 +897,22 @@ class LlmService {
     lockedFields: lockedFields,
   );
 
+  /// T-26 item 1. Asks for lines rather than a JSON patch.
+  ///
+  /// The JSON form is measured across 32 runs and does not work on this model:
+  /// it reproduces whatever JSON is nearest the generation point, and whether a
+  /// fact survives depends on the shape of the conversation rather than what is
+  /// in it - the same sentence extracted from five turns and failed alone, byte
+  /// for byte. Nothing in the stack can constrain the output shape.
+  ///
+  /// `build(section: user)` is still there and still tested; it is what the
+  /// before/after comparison is against, and §4.1 needs the old build to remain
+  /// buildable.
   static String _buildUserMemoryPrompt(
     String conversation,
     String currentMemory,
     Set<String> lockedFields,
-  ) => _memoryExtractionPromptBuilder.build(
-    section: MemoryExtractionSection.user,
+  ) => _memoryExtractionPromptBuilder.buildUserLines(
     conversation: conversation,
     currentMemory: currentMemory,
     lockedFields: lockedFields,

@@ -35,6 +35,20 @@ class _StubLlm extends LlmService {
   int userCalls = 0;
   int allSectionCalls = 0;
 
+  // This file is about which section the pass may write to, so every patch it
+  // sends has to reach `allowedSections` to be judged there. The grounding
+  // check runs first and drops anything the user never said, which on a stub
+  // with no conversation is everything - the soul and identity cases would
+  // still come back `rejected`, but for provenance rather than routing, and
+  // would no longer prove what they are here to prove. These three sentences
+  // ground every value the file uses, so the routing rules stay under test.
+  @override
+  List<String> get userTurns => const <String>[
+    'My goal this year is to run a half marathon.',
+    'Be sarcastic with me.',
+    'I think your name is Qwen.',
+  ];
+
   @override
   Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {

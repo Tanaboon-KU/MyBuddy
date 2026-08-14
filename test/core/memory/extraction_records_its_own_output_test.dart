@@ -18,6 +18,16 @@ class _StubExtractionLlm extends LlmService {
 
   final String response;
 
+  // Same reasoning as the two overrides below. The grounding check drops any
+  // value the user never said, and a stub with no conversation behind it would
+  // have every patch dropped - so these tests would go red over provenance,
+  // which is not what this file is about. The sentence grounds the value the
+  // success case writes.
+  @override
+  List<String> get userTurns => const <String>[
+    'My goal this year is to run a half marathon.',
+  ];
+
   // Both, so the test keeps testing what it is about. T-26 moved the automatic
   // pass from the three-section prompt to the USER-only one; which prompt it
   // uses is not what this file is checking, and stubbing only the old entry
