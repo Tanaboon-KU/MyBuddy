@@ -1,11 +1,15 @@
 /// Which write path this build runs, chosen at build time.
 ///
-/// The protocol describes the write path as "a separate model call re-reads the
-/// conversation and the current memory and outputs updated memory as JSON"
-/// (`my-tasks/README.md` §0), and §9 states the contribution as what a small
-/// on-device model can and cannot do with a layered memory. The JSON pass is
-/// therefore the instrument the paper is about, and anything else measures a
-/// different task and has to say so.
+/// Protocol v2.0 §0 described the write path as "a separate model call re-reads
+/// the conversation and the current memory and outputs updated memory as JSON".
+/// Measured on 2026-08-15 against a five-fact conversation, that pass stored one
+/// fact of five, always the one from the last turn (`T26_arms/`). The owner
+/// accepted the line format as the write path the system ships, and §0 was
+/// rewritten for v2.1 to describe it.
+///
+/// [json] therefore stays as a labelled arm rather than being deleted. It is
+/// the build every block from E1 through E4 was collected on, and it is the
+/// measurement §9 asks for - what a small on-device model can do unaided.
 ///
 /// Three arms, one codebase, so a run is identified by a `--dart-define` rather
 /// than by which branch happened to be checked out:
@@ -19,12 +23,13 @@
 /// and run in every arm. What separates the arms is only what the model is asked
 /// to produce, and whether code captures anything alongside it.
 enum ExtractionArm {
-  /// The pass as the protocol describes it: one model call, JSON out.
+  /// The pass as protocol v2.0 described it: one model call, JSON out. Kept as
+  /// the baseline the paper reports for the model working unaided.
   json('json', asksForJson: true, usesRules: false),
 
-  /// The same call asked for five `field: value` lines instead of an object.
-  /// Measured in T26_lines: more values captured per conversation, and a
-  /// different task from the one §0 describes.
+  /// The same call asked for five `field: value` lines instead of an object,
+  /// and what the system ships as of v2.1 of the protocol. Three values stored
+  /// per conversation where the JSON pass stored one, at the same latency.
   lines('lines', asksForJson: false, usesRules: false),
 
   /// Lines, plus [UserFactRules] capturing identity facts from the user's own
@@ -46,9 +51,11 @@ enum ExtractionArm {
 
   static const String _key = 'EXTRACTION_ARM';
 
-  /// Defaults to [json] deliberately. A build with no define is the system the
-  /// paper describes; the worst case for a missing or mistyped flag is that a
-  /// run measures the documented behaviour rather than an undocumented one.
+  /// The arm a build with no `--dart-define` runs. It has to be the arm the
+  /// system ships, so that the worst case for a missing or mistyped flag is a
+  /// run that measures documented behaviour rather than undocumented behaviour.
+  static const ExtractionArm shipped = ExtractionArm.lines;
+
   static ExtractionArm fromEnvironment() =>
       parse(const String.fromEnvironment(_key));
 
@@ -56,6 +63,6 @@ enum ExtractionArm {
     for (final arm in ExtractionArm.values) {
       if (arm.label == name) return arm;
     }
-    return ExtractionArm.json;
+    return shipped;
   }
 }

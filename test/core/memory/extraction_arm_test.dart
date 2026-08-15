@@ -21,12 +21,19 @@ import 'package:mybuddy/core/memory/extraction_arm.dart';
 /// so what separates the arms is only what the model is asked for and whether
 /// code captures alongside it.
 void main() {
-  test('the default arm is the one the protocol describes', () {
-    // A build with no --dart-define must be the paper's system. Anything else
-    // means an unlabelled build silently measures something the paper does not
-    // describe, which is how this block ended up with 66 runs of a pass that
-    // is not in §0.
-    expect(ExtractionArm.fromEnvironment(), ExtractionArm.json);
+  test('the default arm is the one the system ships', () {
+    // A build with no --dart-define must be the system as it ships, so that an
+    // unlabelled build never measures something no document describes - which
+    // is how this block once ended up with 66 runs of a pass that was not in
+    // §0 at all.
+    //
+    // That arm is `lines` as of 2026-08-15. The JSON pass measured 1 of the 5
+    // facts the user stated (T26_arms §3) and the owner accepted the line
+    // format as the shipped write path; README §0 was rewritten to match and
+    // the protocol went to v2.1. `json` remains a selectable arm because every
+    // block from E1 through E4 was collected on it, and because it is still the
+    // measurement of what the model alone can do.
+    expect(ExtractionArm.fromEnvironment(), ExtractionArm.lines);
   });
 
   test('each arm is selectable by name', () {
@@ -35,12 +42,12 @@ void main() {
     expect(ExtractionArm.parse('lines_rules'), ExtractionArm.linesRules);
   });
 
-  test('an unknown name falls back to the protocol arm, loudly', () {
-    // Never silently: a typo in a run script must not turn into a mislabelled
-    // block. Falling back to json means the worst case is measuring the
-    // documented system, not an undocumented one.
-    expect(ExtractionArm.parse('lnes'), ExtractionArm.json);
-    expect(ExtractionArm.parse(''), ExtractionArm.json);
+  test('an unknown name falls back to the shipped arm', () {
+    // A typo in a run script must not turn into a mislabelled block. Falling
+    // back to the shipped arm means the worst case is a run that measures the
+    // documented system rather than an undocumented one.
+    expect(ExtractionArm.parse('lnes'), ExtractionArm.lines);
+    expect(ExtractionArm.parse(''), ExtractionArm.lines);
   });
 
   test('only the rules arm captures deterministically', () {
