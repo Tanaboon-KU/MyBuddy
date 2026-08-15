@@ -7,9 +7,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../diagnostics/turn_log.dart';
 import '../llm/llm_service.dart';
 import '../llm/memory_tool_semantics.dart';
+import 'extraction_arm.dart';
 import 'extraction_field_routing.dart';
 import 'extraction_grounding.dart';
 import 'extraction_line_format.dart';
+import 'user_fact_rules.dart';
 
 abstract final class MemoryStorageKeys {
   static const String memory = 'mybuddy.companion_memory.v3';
@@ -1461,9 +1463,26 @@ class MemoryService {
   /// `failure`. See ROOT_CAUSE_ANALYSIS.md sections 2 and 7.5; the returned
   /// [MemoryExtractionOutcome] fills `extract_parse_result`,
   /// `extract_raw_output`, `memory_changed` and `layers_changed`.
+  /// [arm] selects which write path this build measures; see [ExtractionArm].
+  /// [ruleCaptures] are the user turns the deterministic layer may read,
+  /// buffered by the caller - empty in every arm but [ExtractionArm.linesRules].
+  ///
+  /// Rule captures are applied here rather than when the turn is typed, on
+  /// purpose. A user-layer write changes the composed system prompt, which
+  /// forces a chat-session rebuild on the next turn: measured, a five-turn run
+  /// is `session_rebuilt = Y N N N N` with ttft around 1,700 ms after the first
+  /// turn, and writing at turn time would make that `Y Y Y Y Y` at about
+  /// 8,700 ms each. Buffering keeps the cost inside the boundary the pass
+  /// already owns.
   Future<MemoryExtractionOutcome> updateMemoryFromChat({
     required LlmService llm,
+    ExtractionArm? arm,
+    List<String> ruleCaptures = const <String>[],
   }) async {
+    final activeArm = arm ?? ExtractionArm.fromEnvironment();
+    final ruleCodes = <String>[
+      if (activeArm.usesRules) ...await _applyRuleCaptures(ruleCaptures),
+    ];
     final before = await loadMemoryData();
 
     String rawResponse;
@@ -1496,33 +1515,42 @@ class MemoryService {
       rawResponse = await llm.extractUserMemoryFromChat(
         jsonEncode(currentUser.toJson()),
         lockedFields: await loadLockedFields(),
+        arm: activeArm,
       );
     } on MemoryExtractionTimeoutException catch (e) {
       debugPrint('MemoryService: extraction timed out: $e');
-      return const MemoryExtractionOutcome(
+      return MemoryExtractionOutcome(
         parseResult: ExtractionParseResult.timedOut,
+        memoryChanged: ruleCodes.isNotEmpty,
+        rejectionCodes: ruleCodes,
       );
     } on MemoryExtractionAbortedException catch (e) {
       // Recorded separately from `failed` so the log can tell a pass that
       // finished and produced nothing usable from one that was cut off partway
       // through producing rubbish. Both store nothing; only one was expensive.
       debugPrint('MemoryService: extraction aborted: $e');
-      return const MemoryExtractionOutcome(
+      return MemoryExtractionOutcome(
         parseResult: ExtractionParseResult.aborted,
+        memoryChanged: ruleCodes.isNotEmpty,
+        rejectionCodes: ruleCodes,
       );
     } catch (e) {
       debugPrint('MemoryService: extraction call failed: $e');
       return MemoryExtractionOutcome(
         parseResult: ExtractionParseResult.failed,
         rawOutput: 'exception: $e',
+        memoryChanged: ruleCodes.isNotEmpty,
+        rejectionCodes: ruleCodes,
       );
     }
 
     if (rawResponse.trim().isEmpty) {
       debugPrint('MemoryService: extraction returned an empty response');
-      return const MemoryExtractionOutcome(
+      return MemoryExtractionOutcome(
         parseResult: ExtractionParseResult.failed,
         rawOutput: '',
+        memoryChanged: ruleCodes.isNotEmpty,
+        rejectionCodes: ruleCodes,
       );
     }
 
@@ -1531,7 +1559,7 @@ class MemoryService {
     // 32 runs say it reproduces whatever JSON sits nearest the generation
     // point, and an answer that arrives in the old shape should still land
     // rather than be recorded as a failure that did not happen.
-    final List<MemoryPatch> patches;
+    List<MemoryPatch> patches;
     if (_lineFormat.hasFieldLines(rawResponse)) {
       final lines = _lineFormat.parse(rawResponse);
       if (lines.isEmpty) {
@@ -1566,6 +1594,35 @@ class MemoryService {
       patches = _parseExtractedMemoryPatches(rawResponse);
     }
 
+    // In the rules arm the deterministic layer owns `name` and `facts`, so a
+    // model patch for either is dropped rather than merged.
+    //
+    // Measured in arm_lines_rules_1..3. Rule captures made <already_known>
+    // non-empty for the first time in this project, and the model answered with
+    // its own memory read back - `facts: works as a software engineer, allergic
+    // to peanuts` - which landed as a third entry beside the two real ones. The
+    // prompt says "NONE if it is already known" and, as everywhere else in this
+    // block, wording did not steer it.
+    //
+    // Enforced here rather than by changing the prompt, so this arm and the
+    // lines arm are handed byte-identical text and differ by one thing.
+    if (activeArm.usesRules) {
+      final owned = patches.where((p) => _ruleOwnedFields.contains(p.field));
+      for (final p in owned) {
+        ruleCodes.add('${p.section}.${p.field}:ruleOwned');
+      }
+      patches = patches
+          .where((p) => !_ruleOwnedFields.contains(p.field))
+          .toList(growable: false);
+    }
+
+    // Routing runs on whatever the readers produced, not inside one of them.
+    // It used to live in the line reader, and a test across all three arms
+    // caught what that meant: the JSON pass - the one the protocol describes -
+    // was not routing at all, so reverting the format would have silently
+    // dropped the allergy correction with it.
+    patches = patches.map(_routed).toList(growable: false);
+
     // T-26: a value the user never said does not go in, however well formed the
     // patch is. Applied here rather than inside applyMemoryPatches because the
     // tool-call path shares that method, and there the model is writing because
@@ -1593,7 +1650,8 @@ class MemoryService {
       return MemoryExtractionOutcome(
         parseResult: ExtractionParseResult.rejected,
         rawOutput: rawResponse,
-        rejectionCodes: ungroundedCodes,
+        memoryChanged: ruleCodes.isNotEmpty,
+        rejectionCodes: <String>[...ruleCodes, ...ungroundedCodes],
       );
     }
 
@@ -1605,6 +1663,7 @@ class MemoryService {
       allowedSections: const <String>{'user'},
     );
     final rejectionCodes = <String>[
+      ...ruleCodes,
       ...ungroundedCodes,
       ...result.rejections.map((r) => '${r.section}.${r.field}:${r.code.name}'),
     ];
@@ -1639,8 +1698,70 @@ class MemoryService {
   }
 
   static const ExtractionGrounding _grounding = ExtractionGrounding();
+  static const UserFactRules _userFactRules = UserFactRules();
+
+  /// What the deterministic layer owns when it is running. The model keeps
+  /// `traits`, `preferences` and `goals`, which are the three fields it has
+  /// measured wins on and which no rule is going to read better.
+  static const Set<String> _ruleOwnedFields = <String>{'name', 'facts'};
+
+  /// Runs the deterministic rules over the buffered turns and writes what they
+  /// find through the same path everything else uses, so locks, caps and
+  /// normalisation still apply. Returns the codes for the log.
+  ///
+  /// Grounding is not applied to these: a rule value is built from the user's
+  /// own sentence by construction, so the check would be tautological. That is
+  /// a real difference from the model path and has to be reported as one.
+  Future<List<String>> _applyRuleCaptures(List<String> turns) async {
+    final patches = <MemoryPatch>[];
+    for (final turn in turns) {
+      for (final capture in _userFactRules.capture(turn)) {
+        patches.add(
+          MemoryPatch(
+            section: 'user',
+            field: capture.field,
+            action: capture.field == 'name'
+                ? MemoryPatchActions.set
+                : MemoryPatchActions.add,
+            value: capture.value,
+          ),
+        );
+      }
+    }
+    if (patches.isEmpty) return const <String>[];
+
+    final result = await applyMemoryPatches(
+      patches,
+      allowedSections: const <String>{'user'},
+    );
+    final codes = patches
+        .map((p) => 'rule:${p.field}=${p.value}')
+        .toList(growable: false);
+    debugPrint(
+      'RULE_CAPTURE| applied ${result.appliedCount} of ${patches.length}: '
+      '${codes.join(' | ')}',
+    );
+    return codes;
+  }
   static const ExtractionLineFormat _lineFormat = ExtractionLineFormat();
   static const ExtractionFieldRouting _routing = ExtractionFieldRouting();
+
+  /// The model finds the fact; this decides which drawer it goes in. Eighteen
+  /// runs filed an allergy under `preferences`, six of them after the prompt was
+  /// changed to say outright that an allergy is a fact.
+  static MemoryPatch _routed(MemoryPatch patch) {
+    if (patch.section != 'user') return patch;
+    final value = patch.value ?? (patch.values.isEmpty ? '' : patch.values.first);
+    final field = _routing.fieldFor(patch.field, value);
+    if (field == patch.field) return patch;
+    return MemoryPatch(
+      section: patch.section,
+      field: field,
+      action: field == 'name' ? MemoryPatchActions.set : patch.action,
+      value: patch.value,
+      values: patch.values,
+    );
+  }
 
   /// Turns the answered lines into patches for the user layer.
   ///
@@ -1652,15 +1773,11 @@ class MemoryService {
     final patches = <MemoryPatch>[];
     for (final entry in lines.entries) {
       for (final value in entry.value) {
-        // The model finds the fact; this decides where it goes. See
-        // [ExtractionFieldRouting] - eighteen runs filed an allergy under
-        // preferences, including six where the prompt said not to.
-        final field = _routing.fieldFor(entry.key, value);
         patches.add(
           MemoryPatch(
             section: 'user',
-            field: field,
-            action: field == 'name'
+            field: entry.key,
+            action: entry.key == 'name'
                 ? MemoryPatchActions.set
                 : MemoryPatchActions.add,
             value: value,

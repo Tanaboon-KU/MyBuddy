@@ -7,6 +7,7 @@ import '../core/diagnostics/battery_status_service.dart';
 import '../core/diagnostics/turn_log.dart';
 import '../core/diagnostics/turn_log_recorder.dart';
 import '../core/llm/llm_service.dart';
+import '../core/memory/extraction_arm.dart';
 import '../core/memory/memory_service.dart';
 import '../core/model/model_descriptor.dart';
 import 'assistant_runtime_controller.dart';
@@ -111,6 +112,15 @@ class AppController extends AssistantRuntimeController {
   bool _memoryUpdateRunning = false;
   int _turnsSinceMemoryUpdate = 0;
   Timer? _memoryIdleTimer;
+
+  /// Which write path this build measures. Named in the log on every pass so a
+  /// block cannot be read back without knowing which arm produced it.
+  final ExtractionArm _arm = ExtractionArm.fromEnvironment();
+
+  /// User turns the rules layer has not been given yet. Only filled in the
+  /// rules arm; see the comment at the call site for why they are not written
+  /// as they arrive.
+  final List<String> _pendingRuleTurns = <String>[];
 
   Future<void>? _startupFuture;
   bool _startupCompleted = false;
@@ -396,6 +406,14 @@ class AppController extends AssistantRuntimeController {
         prevExtractionStillRunning: extractionWasRunning,
       );
 
+      // Buffered, not written. The deterministic layer reads the sentence at
+      // the one moment the last-turn rule cannot reach it, but writing here
+      // would change the composed system prompt and force a session rebuild on
+      // every following turn - `Y N N N N` becomes `Y Y Y Y Y` and ttft goes
+      // from about 1,700 ms to about 8,700 ms. The flush happens inside the
+      // extraction boundary, which already pays that cost once.
+      if (_arm.usesRules) _pendingRuleTurns.add(userText);
+
       unawaited(_handleMemoryTurnProgress(turnIndex));
 
       return assistant;
@@ -501,6 +519,9 @@ class AppController extends AssistantRuntimeController {
     // nothing marked the end of the read path, so "has the reply finished?"
     // could only be answered by watching the screen. E1-nowait needs the answer
     // the instant it changes.
+    debugPrint(
+      'EXTRACTION_ARM ${_arm.label}',
+    );
     debugPrint(
       'TURN_RECORDED session=$_sessionId turn=$turnIndex '
       'ttft=${telemetry?.ttftMs} chars=${telemetry?.sysPromptChars}',
@@ -614,7 +635,13 @@ class AppController extends AssistantRuntimeController {
     final startMs = DateTime.now().millisecondsSinceEpoch;
     MemoryExtractionOutcome outcome;
     try {
-      outcome = await memory.updateMemoryFromChat(llm: llm);
+      final ruleTurns = List<String>.of(_pendingRuleTurns);
+      _pendingRuleTurns.clear();
+      outcome = await memory.updateMemoryFromChat(
+        llm: llm,
+        arm: _arm,
+        ruleCaptures: ruleTurns,
+      );
     } catch (e) {
       debugPrint('AppController: extraction threw: $e');
       outcome = MemoryExtractionOutcome(

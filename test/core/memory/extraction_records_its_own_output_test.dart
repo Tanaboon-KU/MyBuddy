@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mybuddy/core/diagnostics/turn_log.dart';
 import 'package:mybuddy/core/llm/llm_service.dart';
+import 'package:mybuddy/core/memory/extraction_arm.dart';
 import 'package:mybuddy/core/memory/memory_service.dart';
 import 'package:mybuddy/core/unity/unity_bridge.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -42,6 +43,7 @@ class _StubExtractionLlm extends LlmService {
   Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {
     Set<String> lockedFields = const <String>{},
+    ExtractionArm? arm,
   }) async => response;
 }
 

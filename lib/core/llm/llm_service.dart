@@ -11,6 +11,7 @@ import '../memory/memory_service.dart';
 import '../unity/unity_bridge.dart';
 import 'llm_errors.dart';
 import 'llm_platform.dart';
+import '../memory/extraction_arm.dart';
 import 'memory_extraction_prompt_builder.dart';
 import 'model_turn_collector.dart';
 import 'prompt_budgeter.dart';
@@ -899,6 +900,7 @@ class LlmService {
   Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {
     Set<String> lockedFields = const <String>{},
+    ExtractionArm? arm,
   }) async {
     final conversationText = _formatHistoryForMemory(_canonicalDialogue);
     if (conversationText.isEmpty) {
@@ -909,6 +911,7 @@ class LlmService {
       conversationText,
       currentMemoryJson,
       lockedFields,
+      arm ?? ExtractionArm.fromEnvironment(),
     );
     return _runExclusiveMemoryExtraction(prompt);
   }
@@ -991,11 +994,19 @@ class LlmService {
     String conversation,
     String currentMemory,
     Set<String> lockedFields,
-  ) => _memoryExtractionPromptBuilder.buildUserLines(
-    conversation: conversation,
-    currentMemory: currentMemory,
-    lockedFields: lockedFields,
-  );
+    ExtractionArm arm,
+  ) => arm.asksForJson
+      ? _memoryExtractionPromptBuilder.build(
+          section: MemoryExtractionSection.user,
+          conversation: conversation,
+          currentMemory: currentMemory,
+          lockedFields: lockedFields,
+        )
+      : _memoryExtractionPromptBuilder.buildUserLines(
+          conversation: conversation,
+          currentMemory: currentMemory,
+          lockedFields: lockedFields,
+        );
 
   /// Drops the current conversation and starts a fresh one.
   ///
