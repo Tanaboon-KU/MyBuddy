@@ -11,14 +11,36 @@ abstract interface class ToolLoopChat {
 }
 
 final class InferenceToolLoopChat implements ToolLoopChat {
-  InferenceToolLoopChat(this.chat, {required this.generationTimeout});
+  InferenceToolLoopChat(
+    this.chat, {
+    required this.generationTimeout,
+    this.onFirstToken,
+  });
 
   final InferenceChat chat;
   final Duration generationTimeout;
 
+  /// Fired once, when the model emits its first chunk.
+  ///
+  /// This is the only place `ttft_ms` (protocol section 1b) can be observed:
+  /// `generateChat` returns after the whole reply — and after any tool rounds —
+  /// so measuring there would report total generation time, not time to first
+  /// token.
+  final void Function()? onFirstToken;
+
   @override
-  Stream<ModelResponse> generate() =>
-      chat.generateChatResponseAsync().timeout(generationTimeout);
+  Stream<ModelResponse> generate() {
+    var sawFirst = false;
+    return chat.generateChatResponseAsync().timeout(generationTimeout).map((
+      response,
+    ) {
+      if (!sawFirst) {
+        sawFirst = true;
+        onFirstToken?.call();
+      }
+      return response;
+    });
+  }
 
   @override
   Future<void> addToolResults(List<ToolExecutionResult> results) {

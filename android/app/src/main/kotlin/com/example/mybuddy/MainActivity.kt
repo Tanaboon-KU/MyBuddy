@@ -1,7 +1,9 @@
 package com.example.mybuddy
 
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -20,6 +22,9 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val channelName = "unity_bridge"
+
+    // Per-turn battery telemetry for the E1/E2/E3 protocol (section 1b).
+    private val batteryChannelName = "mybuddy/battery"
 
     private val defaultGameObjectName = "UnityBridge"
 
@@ -200,6 +205,49 @@ class MainActivity : FlutterActivity() {
 
                 else -> result.notImplemented()
             }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            batteryChannelName,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "read" -> result.success(readBatteryStatus())
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    /**
+     * Reads battery level and temperature from the sticky ACTION_BATTERY_CHANGED
+     * broadcast.
+     *
+     * Temperature is only available here - BatteryManager exposes no property
+     * for it - which is why this cannot be replaced by an off-the-shelf plugin.
+     *
+     * Returns nulls rather than failing: a missing reading must never abort a
+     * turn or drop its log row.
+     */
+    private fun readBatteryStatus(): Map<String, Any?> {
+        return try {
+            val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            val percent = if (level >= 0 && scale > 0) {
+                (level * 100.0 / scale).toInt()
+            } else {
+                null
+            }
+
+            // EXTRA_TEMPERATURE is in tenths of a degree Celsius.
+            val rawTemp = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+                ?: Int.MIN_VALUE
+            val temperatureC = if (rawTemp != Int.MIN_VALUE) rawTemp / 10.0 else null
+
+            mapOf("percent" to percent, "temperatureC" to temperatureC)
+        } catch (t: Throwable) {
+            mapOf("percent" to null, "temperatureC" to null)
         }
     }
 

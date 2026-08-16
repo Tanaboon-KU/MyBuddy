@@ -91,6 +91,8 @@ class OverlayChatRelay {
         await _handleRecordingCancelRequest();
       } else if (type == 'model_switch_request') {
         await _handleModelSwitchRequest(map);
+      } else if (type == 'new_conversation_request') {
+        await _handleNewConversationRequest(map);
       }
     } catch (e) {
       debugPrint('OverlayChatRelay: error handling message: $e');
@@ -364,6 +366,56 @@ class OverlayChatRelay {
       await FlutterOverlayWindow.shareData(jsonEncode(payload));
     } catch (e) {
       debugPrint('OverlayChatRelay: recording_response send failed: $e');
+    }
+  }
+
+  final Set<String> _inFlightNewConversationRequests = {};
+
+  Future<void> _handleNewConversationRequest(Map<String, dynamic> map) async {
+    final requestId = map['requestId'] as String? ?? '';
+    debugPrint('OverlayChatRelay: new_conversation_request id=$requestId');
+
+    if (requestId.isEmpty) return;
+    if (_inFlightNewConversationRequests.contains(requestId)) {
+      debugPrint(
+        'OverlayChatRelay: new_conversation_request already in flight: '
+        '$requestId',
+      );
+      return;
+    }
+    _inFlightNewConversationRequests.add(requestId);
+
+    try {
+      await appController.startNewConversation();
+      // The cleared conversation reaches the overlay through the regular
+      // runtime_status broadcast triggered by notifyListeners().
+      await _sendNewConversationResponse(requestId: requestId);
+    } catch (e) {
+      debugPrint('OverlayChatRelay: new conversation error: $e');
+      await _sendNewConversationResponse(requestId: requestId, error: '$e');
+    } finally {
+      _inFlightNewConversationRequests.remove(requestId);
+    }
+  }
+
+  Future<void> _sendNewConversationResponse({
+    required String requestId,
+    String? error,
+  }) async {
+    final payload = <String, Object>{
+      'type': 'new_conversation_response',
+      'requestId': requestId,
+      if (error != null) 'error': error,
+    };
+    debugPrint(
+      'OverlayChatRelay: sending new_conversation_response id=$requestId',
+    );
+    try {
+      await FlutterOverlayWindow.shareData(jsonEncode(payload));
+    } catch (e) {
+      debugPrint(
+        'OverlayChatRelay: new_conversation_response send failed: $e',
+      );
     }
   }
 

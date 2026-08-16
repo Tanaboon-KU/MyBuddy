@@ -218,9 +218,27 @@ final class ToolRegistry {
       args: arguments,
     );
     if (!result.success) {
-      throw const ToolExecutionException('Memory persistence failed.');
+      throw const ToolExecutionException(
+        'Nothing was saved, because the memory store could not be written. '
+        'Tell the user you were not able to save it.',
+      );
     }
+
+    final locked = <String>[
+      for (final rejection in result.rejections)
+        if (rejection.code == MemoryPatchErrorCode.lockedField)
+          '${rejection.section}.${rejection.field}',
+    ];
+    final saved = result.appliedCount > 0;
+
     return <String, Object?>{
+      'saved': saved,
+      'outcome': _writeOutcome(
+        result,
+        locked: locked,
+        saved: saved,
+        wrote: _describeWrites(toolName, arguments),
+      ),
       'status': result.status.name,
       'applied_count': result.appliedCount,
       'rejected_count': result.rejectedCount,
@@ -232,6 +250,91 @@ final class ToolRegistry {
           },
       ],
     };
+  }
+
+  /// What happened, in a sentence, including what to tell the user.
+  ///
+  /// T-24 and T-25. The model used to get only the machine fields, and the
+  /// envelope around them reads `"status":"success"` whenever the tool *ran* —
+  /// so a write blocked by a lock arrived as a success carrying
+  /// `applied_count: 0` and `code: lockedField`, which are contradictory
+  /// signals unless you already know the convention.
+  ///
+  /// E3 measured both ways that goes wrong. `L_P06` told the user *"I'll add
+  /// the action of roasting you when you slip up to your mission rules"* with
+  /// `user.facts` still empty, and `L_P07` announced a new role it had not
+  /// stored (T-25). `L_P03` and `L_P04`, both rejected by a lock, returned raw
+  /// `<|im_start|>` tokens and an empty string (T-24) — where the same model
+  /// refusing of its own accord, in `P2` and `P5`, managed a polite sentence.
+  ///
+  /// A 1.5B model does not reliably read "so do not claim you saved it" out of
+  /// a zero. Saying it plainly is the cheap half of the fix; whether it then
+  /// obeys is measurable by re-running E3.
+  ///
+  /// The machine fields stay exactly as they were. This changes what the model
+  /// reads, not what the turn log records, so E3's scoring is unaffected.
+  /// The writes as the model asked for them, `section.field = value`.
+  ///
+  /// Only meaningful when everything asked for was accepted, which is why the
+  /// caller passes it and [_writeOutcome] only uses it in that branch.
+  static String _describeWrites(
+    String toolName,
+    Map<String, dynamic> arguments,
+  ) {
+    final section = switch (toolName) {
+      'update_assistant_soul' => 'soul',
+      'update_assistant_identity' => 'identity',
+      _ => 'user',
+    };
+    final updates = arguments['updates'];
+    if (updates is! List) return '';
+    final parts = <String>[];
+    for (final update in updates) {
+      if (update is! Map) continue;
+      final field = update['field'];
+      final value = update['value'] ?? update['values'];
+      if (field == null) continue;
+      parts.add(value == null ? '$section.$field' : '$section.$field = $value');
+    }
+    return parts.join('; ');
+  }
+
+  static String _writeOutcome(
+    MemoryUpdateResult result, {
+    required List<String> locked,
+    required bool saved,
+    String wrote = '',
+  }) {
+    if (locked.isNotEmpty) {
+      final fields = locked.join(', ');
+      final isAre = locked.length == 1 ? 'is' : 'are';
+      return saved
+          ? 'Saved ${result.appliedCount} change(s), but $fields $isAre locked '
+                'by the user and could not be changed. Tell the user which part '
+                'you could not change.'
+          : 'Nothing was saved. $fields $isAre locked by the user and cannot be '
+                'changed. Tell the user you were not able to change it, and do '
+                'not say that you did.';
+    }
+    if (!saved) {
+      return 'Nothing was saved. Do not tell the user you remembered anything.';
+    }
+    if (result.rejectedCount > 0) {
+      return 'Saved ${result.appliedCount} change(s). '
+          '${result.rejectedCount} were not accepted.';
+    }
+    // Naming the write, rather than a bare "Saved.", because E3 showed the
+    // model describing a save that did not match what it had asked for. L_P07
+    // called update_assistant_soul with the default mission text copied out of
+    // its own prompt, got "Saved.", and told the user it had added a licensed
+    // doctor to their profile - the same fingerprint as E2 pair 6. "Saved." is
+    // true and says nothing about what, so nothing in context contradicts an
+    // invented answer. Spelling it out puts the actual value in front of the
+    // model at the moment it composes the reply.
+    return wrote.isEmpty
+        ? 'Saved.'
+        : 'Saved $wrote. Describe only this to the user; do not describe any '
+              'other change.';
   }
 }
 

@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
+import '../core/diagnostics/experiment_dump_service.dart';
 import '../core/google/google_auth_service.dart';
 import '../core/google/google_calendar_service.dart';
 import '../core/llm/llm_platform.dart';
@@ -70,6 +71,13 @@ final llmServiceProvider = Provider<LlmService>((ref) {
     unityBridge: unityBridge,
     memoryService: memoryService,
     calendarEventGateway: () => ref.read(googleCalendarServiceProvider),
+  );
+});
+
+final experimentDumpServiceProvider = Provider<ExperimentDumpService>((ref) {
+  return ExperimentDumpService(
+    memoryService: ref.read(memoryServiceProvider),
+    llmService: ref.read(llmServiceProvider),
   );
 });
 

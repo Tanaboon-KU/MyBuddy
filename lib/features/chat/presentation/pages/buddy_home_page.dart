@@ -11,6 +11,8 @@ import '../../../../core/audio/audio_recorder_service.dart';
 import '../../../../core/tts/tts_service.dart';
 import '../../../../core/unity/unity_bridge.dart';
 import '../../../../shared/widgets/glass/glass.dart';
+import '../../../diagnostics/experiment_tools_access.dart';
+import '../../../diagnostics/presentation/widgets/experiment_tools_sheet.dart';
 import '../../../google_calendar/presentation/pages/google_calendar_page.dart';
 import '../../../settings/presentation/pages/settings_page.dart';
 import '../controllers/chat_session_controller.dart';
@@ -110,6 +112,41 @@ class _BuddyHomePageState extends ConsumerState<BuddyHomePage> {
     );
   }
 
+  /// Clears the conversation without touching stored memory or the loaded
+  /// model. No confirmation prompt: the transcript is in-memory only and is
+  /// already lost on every app restart.
+  Future<void> _startNewConversation() async {
+    final appController = ref.read(appControllerProvider);
+    final discarded = appController.conversation.length;
+
+    try {
+      await appController.startNewConversation();
+    } on StateError catch (e) {
+      _showSnack(e.message);
+      return;
+    } catch (e) {
+      _showSnack('Could not start a new conversation: $e');
+      return;
+    }
+
+    _showSnack(
+      discarded == 0
+          ? 'New conversation started'
+          : 'New conversation started — $discarded message(s) cleared',
+    );
+  }
+
+  Future<void> _openExperimentTools() {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => ExperimentToolsSheet(
+        onOpenMemoryEditor: _openMemoryEditor,
+      ),
+    );
+  }
+
   Future<void> _openMemoryEditor() async {
     final memoryService = ref.read(memoryServiceProvider);
     final currentMemory = await memoryService.loadMemoryData();
@@ -127,6 +164,10 @@ class _BuddyHomePageState extends ConsumerState<BuddyHomePage> {
         initialAutoUpdate: autoUpdate,
         initialLockedFields: lockedFields,
         memoryService: memoryService,
+        onResetToColdStart: () async {
+          await ref.read(appControllerProvider).resetMemoryToColdStart();
+          _showSnack('Memory reset to cold start');
+        },
       ),
     );
   }
@@ -187,6 +228,20 @@ class _BuddyHomePageState extends ConsumerState<BuddyHomePage> {
         runSpacing: 8,
         children: [
           _buildCalendarButton(),
+          GlassIconButton.pill(
+            tooltip: 'New conversation',
+            icon: Icons.add_comment_outlined,
+            onPressed: _startNewConversation,
+          ),
+          // Debug builds only, unless a build asks for it by name. The sheet
+          // behind this resets memory, seeds the profile and dumps the
+          // conversation to disk - see ExperimentToolsAccess.
+          if (ExperimentToolsAccess.current)
+            GlassIconButton.pill(
+              tooltip: 'Experiment tools',
+              icon: Icons.science_outlined,
+              onPressed: _openExperimentTools,
+            ),
           GlassIconButton.pill(
             tooltip: 'Memory',
             icon: Icons.psychology_rounded,

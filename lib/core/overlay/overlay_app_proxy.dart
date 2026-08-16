@@ -21,6 +21,7 @@ class OverlayAppProxy extends AssistantRuntimeController {
   final Map<String, Completer<String?>> _sttPending = {};
   final Map<String, Completer<String>> _recordingPending = {};
   final Map<String, Completer<void>> _modelSwitchPending = {};
+  final Map<String, Completer<void>> _newConversationPending = {};
   bool _isListening = false;
 
   bool _llmInstalled = false;
@@ -67,6 +68,8 @@ class OverlayAppProxy extends AssistantRuntimeController {
         _handleRecordingResponse(map);
       } else if (type == 'model_switch_response') {
         _handleModelSwitchResponse(map);
+      } else if (type == 'new_conversation_response') {
+        _handleNewConversationResponse(map);
       } else if (type == 'runtime_status') {
         _handleRuntimeStatus(map);
       }
@@ -152,6 +155,24 @@ class OverlayAppProxy extends AssistantRuntimeController {
     }
   }
 
+  void _handleNewConversationResponse(Map<String, dynamic> map) {
+    final requestId = '${map['requestId'] ?? ''}';
+    final completer = _newConversationPending.remove(requestId);
+    if (completer == null) {
+      debugPrint(
+        'OverlayAppProxy: no pending new_conversation for requestId=$requestId',
+      );
+      return;
+    }
+
+    final error = map['error'] as String?;
+    if (error != null) {
+      completer.completeError(Exception(error));
+    } else {
+      completer.complete();
+    }
+  }
+
   void _handleRuntimeStatus(Map<String, dynamic> map) {
     _llmInstalled = map['llmInstalled'] as bool? ?? _llmInstalled;
     _installingLlm = map['installingLlm'] as bool? ?? _installingLlm;
@@ -201,6 +222,43 @@ class OverlayAppProxy extends AssistantRuntimeController {
         _chatPending.remove(id);
         debugPrint('OverlayAppProxy.chatOnce: timed out id=$id');
         throw TimeoutException('LLM response timed out');
+      },
+    );
+  }
+
+  @override
+  Future<void> startNewConversation() async {
+    if (!_isListening) {
+      throw StateError('Overlay channel is not ready yet. Please try again.');
+    }
+
+    final id = _createRequestId();
+    final completer = Completer<void>();
+    _newConversationPending[id] = completer;
+
+    final payload = <String, Object>{
+      'type': 'new_conversation_request',
+      'requestId': id,
+    };
+
+    debugPrint(
+      'OverlayAppProxy.startNewConversation: sending request id=$id',
+    );
+
+    try {
+      await FlutterOverlayWindow.shareData(jsonEncode(payload));
+    } catch (e) {
+      _newConversationPending.remove(id);
+      debugPrint('OverlayAppProxy.startNewConversation: shareData failed: $e');
+      rethrow;
+    }
+
+    return completer.future.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () {
+        _newConversationPending.remove(id);
+        debugPrint('OverlayAppProxy.startNewConversation: timed out id=$id');
+        throw TimeoutException('Starting a new conversation timed out');
       },
     );
   }
@@ -420,6 +478,12 @@ class OverlayAppProxy extends AssistantRuntimeController {
       }
     }
     _modelSwitchPending.clear();
+    for (final c in _newConversationPending.values) {
+      if (!c.isCompleted) {
+        c.completeError(Exception('Overlay closed'));
+      }
+    }
+    _newConversationPending.clear();
   }
 }
 

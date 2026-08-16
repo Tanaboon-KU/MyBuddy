@@ -388,7 +388,11 @@ function Setup-Jar {
         if (Test-Path $cachedJar) {
             # Verify cached JAR checksum before reuse
             if ($JarChecksum) {
-                $actualChecksum = (Get-FileHash -Path $cachedJar -Algorithm SHA256).Hash.ToLower()
+                # Use the helper, not Get-FileHash directly: it falls back to
+                # certutil in environments where the cmdlet is unavailable.
+                # MSBuild's custom-build step is one of them, which made this
+                # the only one of four checksum sites that broke the build.
+                $actualChecksum = Get-SHA256Hash -FilePath $cachedJar
                 if ($actualChecksum -ne $JarChecksum.ToLower()) {
                     Write-Host "Cached JAR checksum mismatch, re-downloading..." -ForegroundColor Yellow
                     Remove-Item -Path $cachedJar -Force

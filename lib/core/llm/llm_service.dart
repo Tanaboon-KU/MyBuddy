@@ -1,17 +1,21 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 
+import '../diagnostics/turn_log.dart';
 import '../google/calendar_event_gateway.dart';
 import '../memory/memory_service.dart';
 import '../unity/unity_bridge.dart';
 import 'llm_errors.dart';
 import 'llm_platform.dart';
+import '../memory/extraction_arm.dart';
 import 'memory_extraction_prompt_builder.dart';
 import 'model_turn_collector.dart';
 import 'prompt_budgeter.dart';
+import 'repetition_guard.dart';
 import 'temporal_context.dart';
 import 'tool_loop_chat.dart';
 import 'tool_orchestrator.dart';
@@ -83,7 +87,65 @@ class LlmService {
   Future<void>? _initializeFuture;
   Future<void>? _activationFuture;
   String? _systemFingerprint;
+
+  /// Set once an extraction pass has generated on this model, cleared when the
+  /// chat session is rebuilt. See [_chatSurvivesExtraction].
+  bool _extractionTouchedTheModel = false;
+
+  /// An extraction session that would not close, so the native invocation
+  /// behind it is still running and the engine cannot be trusted.
+  ///
+  /// Measured with a six-turn conversation: the pass aborted, `close()` threw
+  /// `Previous invocation still processing`, the throw was swallowed, and the
+  /// NEXT pass died inside the plugin's `createSession` - which closes the
+  /// previous session before making a new one. Two runs of three, and the
+  /// failure surfaced a pass away from its cause.
+  ///
+  /// Reloading the model is the only thing that clears it, so this is a flag
+  /// rather than a reload on the spot: the reload costs seconds and heat, and
+  /// doing it inside the failing pass would charge them to whatever chat turn
+  /// happens to be waiting.
+  bool _nativeSessionWedged = false;
   final List<Message> _canonicalDialogue = <Message>[];
+
+  /// What the user themselves typed this session, one entry per turn, in order.
+  ///
+  /// Read from the canonical dialogue rather than the replayed one, so it is
+  /// the user's own words without the temporal-context block the model is sent.
+  /// The extraction pass uses it to check that a value it produced came from
+  /// the user at all - see [ExtractionGrounding] - which is only answerable if
+  /// the assistant's turns are excluded, since that is where the invented goal
+  /// in T-26 came from.
+  List<String> get userTurns => _canonicalDialogue
+      .where((m) => m.isUser && m.type == MessageType.text && !m.hasImage)
+      .map((m) => m.text)
+      .where((t) => t.trim().isNotEmpty)
+      .toList(growable: false);
+
+  String? _lastComposedSystemText;
+
+  /// The exact system instruction most recently handed to the model.
+  ///
+  /// This is the post-[_composeSystemText] string — memory block *plus* the
+  /// `<tool_rules>` and `<tools>` blocks. `MemoryService.buildSystemPrompt`
+  /// alone returns only the memory block, which is roughly a third of what the
+  /// model actually receives, so instrumentation must read this instead.
+  ///
+  /// Null until the first [generateChat]; survives [startNewConversation] so a
+  /// dump taken right after a turn still reports that turn's prompt.
+  String? get lastComposedSystemText => _lastComposedSystemText;
+
+  /// Character count of [lastComposedSystemText]; 0 before the first turn.
+  int get lastComposedSystemChars => _lastComposedSystemText?.length ?? 0;
+
+  ChatGenerationTelemetry? _lastGenerationTelemetry;
+
+  /// Per-turn measurements from the most recent [generateChat].
+  ///
+  /// Feeds the timing and prompt columns of the log required by protocol
+  /// section 1b. Null until the first turn completes.
+  ChatGenerationTelemetry? get lastGenerationTelemetry =>
+      _lastGenerationTelemetry;
 
   Future<T> _runExclusive<T>(Future<T> Function() action) {
     if (Zone.current[_exclusiveZoneKey] == true) {
@@ -138,6 +200,27 @@ class LlmService {
       if (msg.contains('session not created')) return true;
     }
     return error.toString().toLowerCase().contains('session not created');
+  }
+
+  /// Drops the engine without dropping the conversation.
+  ///
+  /// [_resetNativeState] also clears [_canonicalDialogue], which is right when
+  /// the app is tearing down or swapping models and wrong here: the engine is
+  /// being replaced because an extraction session wedged, and what the user
+  /// said is not implicated. Clearing it turned the crash into a pass that ran
+  /// in 1ms against an empty conversation and stored nothing - quieter, and
+  /// just as broken. The next chat turn rebuilds the session and replays the
+  /// dialogue through the path that already exists for T-21.
+  Future<void> _reloadEngineKeepingDialogue() async {
+    final model = _model;
+    _chat = null;
+    _model = null;
+    _systemFingerprint = null;
+    if (model != null) {
+      try {
+        await model.close();
+      } catch (_) {}
+    }
   }
 
   Future<void> _resetNativeState() async {
@@ -207,6 +290,14 @@ class LlmService {
   }
 
   Future<InferenceModel> _ensureModel() async {
+    if (_nativeSessionWedged) {
+      debugPrint(
+        'LlmService: an extraction session never closed; reloading the model '
+        'before using it again',
+      );
+      _nativeSessionWedged = false;
+      await _reloadEngineKeepingDialogue();
+    }
     if (_model != null) return _model!;
 
     debugPrint(
@@ -242,14 +333,35 @@ class LlmService {
     }
   }
 
-  String _composeSystemText(String systemText, String toolsInstruction) {
-    final base = systemText.trim();
-    if (toolsInstruction.isEmpty) return base;
-    if (base.isEmpty) return toolsInstruction;
-    return '$base\n\n$toolsInstruction';
+  /// [trailing] goes after the tool blocks, which is the point of it — T-12.
+  ///
+  /// The USER profile used to sit inline in the memory block, a quarter of the
+  /// way in, with ~5,500 characters of tool definitions between it and the
+  /// generation point. T-26 established that this model reproduces whatever is
+  /// nearest that point, so position is the one lever it demonstrably responds
+  /// to. Empty by default, so every caller that does not ask for this composes
+  /// exactly as before.
+  String _composeSystemText(
+    String systemText,
+    String toolsInstruction, {
+    String trailing = '',
+  }) {
+    final parts = <String>[
+      systemText.trim(),
+      toolsInstruction.trim(),
+      trailing.trim(),
+    ]..removeWhere((p) => p.isEmpty);
+    return parts.join('\n\n');
   }
 
+  /// Messages actually replayed by the last [_replayCanonicalDialogue].
+  ///
+  /// Lower than the stored history means older turns were dropped to fit the
+  /// budget — silently, before this counter existed.
+  int _lastReplayedMessageCount = 0;
+
   Future<void> _replayCanonicalDialogue(InferenceChat chat) async {
+    _lastReplayedMessageCount = 0;
     if (_canonicalDialogue.isEmpty) return;
 
     final systemInstruction = _systemFingerprint ?? '';
@@ -283,6 +395,14 @@ class LlmService {
     }
 
     final messagesToReplay = turnsToReplay.expand((t) => t).toList();
+    _lastReplayedMessageCount = messagesToReplay.length;
+    if (messagesToReplay.length < _canonicalDialogue.length) {
+      debugPrint(
+        'LlmService: replay dropped '
+        '${_canonicalDialogue.length - messagesToReplay.length} message(s) '
+        'to fit the token budget',
+      );
+    }
     await chat.clearHistory(replayHistory: messagesToReplay);
   }
 
@@ -361,6 +481,7 @@ class LlmService {
   Future<String> generateChat({
     String? systemText,
     required String userText,
+    String trailingSystemText = '',
   }) async {
     return _runExclusive(() async {
       final model = await _ensureModel();
@@ -379,11 +500,25 @@ class LlmService {
       final composedSystemText = _composeSystemText(
         systemText ?? '',
         toolsInstruction,
+        trailing: trailingSystemText,
       );
+      _lastComposedSystemText = composedSystemText;
+
+      final replyStartMs = DateTime.now().millisecondsSinceEpoch;
+      int? firstTokenMs;
 
       final needsRebuild =
-          _chat == null || _systemFingerprint != composedSystemText;
+          _chat == null ||
+          _systemFingerprint != composedSystemText ||
+          !_chatSurvivesExtraction;
       if (needsRebuild) {
+        if (_extractionTouchedTheModel) {
+          debugPrint(
+            'LlmService: rebuilding the chat session because an extraction '
+            'pass generated on this model (T-21/T-29)',
+          );
+        }
+        _extractionTouchedTheModel = false;
         if (_chat != null) {
           try {
             await _chat!.session.close();
@@ -429,6 +564,7 @@ class LlmService {
             );
             debugPrint(
               'LlmService: prompt tokens=${budget.inputTokens} '
+              'system=${budget.systemTokens} chars=${composedSystemText.length} '
               'limit=${budget.inputLimit} buffer=${budget.effectiveTokenBuffer}',
             );
             if (!budget.fits) {
@@ -443,14 +579,32 @@ class LlmService {
           }
 
           stage = _GenerationStage.generating;
-          final result = await ToolOrchestrator(
+          final orchestrator = ToolOrchestrator(
             chat: InferenceToolLoopChat(
               _chat!,
               generationTimeout: _chatGenerationTimeout,
+              onFirstToken: () {
+                firstTokenMs ??= DateTime.now().millisecondsSinceEpoch;
+              },
             ),
             collector: ModelTurnCollector(modelType: modelType),
             tools: toolSnapshot,
-          ).run();
+          );
+          final result = await orchestrator.run();
+
+          _lastGenerationTelemetry = ChatGenerationTelemetry(
+            replyStartMs: replyStartMs,
+            replyEndMs: DateTime.now().millisecondsSinceEpoch,
+            ttftMs: firstTokenMs == null ? null : firstTokenMs! - replyStartMs,
+            sysPromptChars: composedSystemText.length,
+            sysPromptSha256: TurnLogEntry.hashPrompt(composedSystemText),
+            sessionRebuilt: needsRebuild,
+            replayedMessageCount: needsRebuild ? _lastReplayedMessageCount : 0,
+            toolsExposed: toolSnapshot.definitions
+                .map((t) => t.name)
+                .toList(growable: false),
+            toolCalls: orchestrator.executedCalls,
+          );
 
           _canonicalDialogue.add(canonicalUserMessage);
           _canonicalDialogue.add(Message.text(text: result, isUser: false));
@@ -508,10 +662,39 @@ class LlmService {
     });
   }
 
+  /// Wall clock one extraction pass may take, as opposed to the gap between
+  /// two tokens that `Stream.timeout` bounds.
+  ///
+  /// 90s is generous against a pass that works: the successful T-07
+  /// verification finished in 10.3s, and pre-fix passes averaged 6.7s. It is
+  /// aimed at the 175,576 ms measured in E1 block 2, where the user waits
+  /// three minutes for a result that fails to parse and, through T-21, pays
+  /// for it again on the next turn.
+  static const Duration extractionDeadline = Duration(seconds: 90);
+
+  /// How much one pass may emit before it is written off.
+  ///
+  /// A valid patch for this schema runs to a couple of hundred characters. The
+  /// runaway reached 5,438 and stopped on its own, not because anything
+  /// stopped it. Set well clear of anything useful so it only catches a pass
+  /// that has already gone wrong.
+  static const int extractionCharLimit = 2000;
+
+  static const RepetitionGuard _repetitionGuard = RepetitionGuard();
+
   /// Runs memory extraction in a temporary one-shot session WITHOUT closing
   /// the active [_chat]. This prevents session corruption when called from
   /// inside a tool-call (which itself runs inside [_runExclusive]).
   Future<String> _runExclusiveMemoryExtraction(String prompt) async {
+    // The prompt this pass actually receives has never been observable. The
+    // dump service captures the chat system prompt only, so every diagnosis of
+    // the extraction pass so far — including two that turned out to be wrong —
+    // was argued against a prompt reconstructed in a test rather than the one
+    // the model was handed. Printed a line at a time because debugPrint splits
+    // on newlines anyway and a single logcat entry cannot hold the whole thing.
+    for (final line in const LineSplitter().convert(prompt)) {
+      debugPrint('EXTRACTION_PROMPT| $line');
+    }
     return _runExclusive(() async {
       final model = await _ensureModel();
 
@@ -527,24 +710,141 @@ class LlmService {
       try {
         await session.addQueryChunk(Message.text(text: prompt, isUser: true));
         final responseBuffer = StringBuffer();
+        final started = DateTime.now();
+        var sinceGuardCheck = 0;
+        String? abortReason;
+
+        // The `.timeout` below is kept, but it is not the budget. Dart's
+        // Stream.timeout measures the gap *between* events, so a model
+        // emitting a token every few hundred ms never trips it however long it
+        // runs — E1 block 2 measured a pass at 175,576 ms that never fired,
+        // and STEP0_VERIFICATION recorded one at 228,073 ms before that. The
+        // three checks in the loop are the real ceilings.
         await for (final chunk in session.getResponseAsync().timeout(
           const Duration(seconds: 60),
         )) {
           responseBuffer.write(chunk);
+
+          if (responseBuffer.length > extractionCharLimit) {
+            abortReason = 'char-limit';
+            break;
+          }
+          if (DateTime.now().difference(started) > extractionDeadline) {
+            abortReason = 'deadline';
+            break;
+          }
+          // Not every chunk: hasCollapsed walks a 200-character window and
+          // responseBuffer.toString() copies the lot, so checking per token
+          // would make this quadratic for no benefit at 8 tokens a second.
+          sinceGuardCheck += chunk.length;
+          if (sinceGuardCheck >= 50) {
+            sinceGuardCheck = 0;
+            // Both, either one ends the pass.
+            //
+            // The trigram test was taken off this path for a while, on the
+            // reading that it misjudged structured output - it aborts at 158
+            // characters here, and a correct two-patch JSON extraction scores
+            // 0.63 against its 0.70 threshold. Logging the aborted text settled
+            // it: what it was stopping was real degeneration, the model echoing
+            // the transcript back and looping on one phrase. Taking it off
+            // bought 10 more seconds of that and the same empty result.
+            //
+            // The two-patch risk is real but latent, and this is not the place
+            // to trade a working check against it.
+            final sofar = responseBuffer.toString();
+            if (_repetitionGuard.hasCollapsed(sofar) ||
+                RepetitionGuard.extractionHasStalled(sofar)) {
+              abortReason = 'repetition';
+              break;
+            }
+          }
         }
-        return _cleanResponse(responseBuffer.toString());
+
+        final elapsed = DateTime.now().difference(started);
+        final raw = responseBuffer.toString();
+        if (abortReason != null) {
+          // Breaking out of `await for` cancels the subscription, which is what
+          // stops the model burning the rest of the pass.
+          debugPrint(
+            'EXTRACTION_ABORTED reason=$abortReason chars=${raw.length} '
+            'ms=${elapsed.inMilliseconds}',
+          );
+          // What it was repeating, not just that it repeated. Three rounds of
+          // diagnosis on the handset stalled here: the reason and the length
+          // are the same whichever check fired and whatever the model wrote, so
+          // neither could say whether the guard had misjudged a good answer or
+          // caught a real stall. The abort throws the text away, so if it is
+          // not logged now it is gone.
+          for (final line in const LineSplitter().convert(
+            raw.length > 400 ? raw.substring(raw.length - 400) : raw,
+          )) {
+            debugPrint('EXTRACTION_ABORTED_TAIL| $line');
+          }
+          throw MemoryExtractionAbortedException(
+            abortReason,
+            elapsed,
+            raw.length,
+          );
+        }
+        return _cleanResponse(raw);
       } on TimeoutException {
-        debugPrint(
-          'LlmService: memory extraction timed out after 60s - returning empty.',
-        );
-        return '';
+        // Previously this returned '', which the caller could not tell apart
+        // from "the model had nothing to change". The protocol needs the two
+        // separated (extract_parse_result), so it now surfaces as an error.
+        debugPrint('LlmService: memory extraction stalled for 60s.');
+        throw const MemoryExtractionTimeoutException(Duration(seconds: 60));
       } finally {
+        // Regardless of how the pass ended. What invalidates the chat session
+        // is that a second session generated on this LlmInference at all, not
+        // whether it produced anything useful.
+        _extractionTouchedTheModel = true;
         try {
           await session.close().timeout(const Duration(seconds: 5));
-        } catch (_) {}
+        } catch (e) {
+          // Swallowing this is what let one failed pass break the next one.
+          // The session is still generating natively and nothing here can stop
+          // it, so the engine is marked unusable and rebuilt before its next
+          // use instead.
+          debugPrint(
+            'LlmService: extraction session would not close, so the model is '
+            'now stale and will be reloaded: $e',
+          );
+          _nativeSessionWedged = true;
+        }
       }
     });
   }
+
+  /// Why an extraction pass forces the chat session to be rebuilt — T-21 and
+  /// T-29, which are one fault wearing two faces.
+  ///
+  /// [_runExclusiveMemoryExtraction] deliberately does not touch [_chat],
+  /// on the reasoning that a separate session cannot disturb it. The device
+  /// says otherwise, and the vendored fork shows why: every session is created
+  /// from the one `LlmInference` (`MediaPipeEngine.createSession` hands them
+  /// all the same engine and even the same `_partialResults` flow), and that
+  /// engine carries the working context. Generating from a second session
+  /// leaves the first one's context gone.
+  ///
+  /// Nothing noticed, because `needsRebuild` only asks whether the composed
+  /// system prompt changed. Extraction that stores nothing leaves it identical,
+  /// so the app kept the old [_chat] and reported `session_rebuilt=N` with
+  /// `replayed_message_count=0` — while the native session had in fact been
+  /// emptied. Both measurements follow:
+  ///
+  /// * **T-21.** The next turn re-prefills the whole prompt, so `ttft_ms` goes
+  ///   from 1,843-1,925 to 20,601-27,799 in E1 block 2, with the log insisting
+  ///   nothing was rebuilt.
+  /// * **T-29.** That turn also answers as though the conversation never
+  ///   happened. E2 got byte-identical replies from condition A and condition B
+  ///   in all twelve pairs, and E1's `nowait` arm — the one that never runs
+  ///   extraction — is the control that still remembers.
+  ///
+  /// Rebuilding replays the dialogue through `clearHistory(replayHistory:)`, so
+  /// the conversation comes back. The re-prefill cost does not go away; it was
+  /// always being paid, silently and for nothing. Now it buys correct context
+  /// and shows up honestly as `session_rebuilt=Y`.
+  bool get _chatSurvivesExtraction => !_extractionTouchedTheModel;
 
   Future<String> extractMemoryFromChat(
     String currentMemoryJson, {
@@ -600,6 +900,7 @@ class LlmService {
   Future<String> extractUserMemoryFromChat(
     String currentMemoryJson, {
     Set<String> lockedFields = const <String>{},
+    ExtractionArm? arm,
   }) async {
     final conversationText = _formatHistoryForMemory(_canonicalDialogue);
     if (conversationText.isEmpty) {
@@ -610,6 +911,7 @@ class LlmService {
       conversationText,
       currentMemoryJson,
       lockedFields,
+      arm ?? ExtractionArm.fromEnvironment(),
     );
     return _runExclusiveMemoryExtraction(prompt);
   }
@@ -677,16 +979,66 @@ class LlmService {
     lockedFields: lockedFields,
   );
 
+  /// T-26 item 1. Asks for lines rather than a JSON patch.
+  ///
+  /// The JSON form is measured across 32 runs and does not work on this model:
+  /// it reproduces whatever JSON is nearest the generation point, and whether a
+  /// fact survives depends on the shape of the conversation rather than what is
+  /// in it - the same sentence extracted from five turns and failed alone, byte
+  /// for byte. Nothing in the stack can constrain the output shape.
+  ///
+  /// `build(section: user)` is still there and still tested; it is what the
+  /// before/after comparison is against, and §4.1 needs the old build to remain
+  /// buildable.
   static String _buildUserMemoryPrompt(
     String conversation,
     String currentMemory,
     Set<String> lockedFields,
-  ) => _memoryExtractionPromptBuilder.build(
-    section: MemoryExtractionSection.user,
-    conversation: conversation,
-    currentMemory: currentMemory,
-    lockedFields: lockedFields,
-  );
+    ExtractionArm arm,
+  ) => arm.asksForJson
+      ? _memoryExtractionPromptBuilder.build(
+          section: MemoryExtractionSection.user,
+          conversation: conversation,
+          currentMemory: currentMemory,
+          lockedFields: lockedFields,
+        )
+      : _memoryExtractionPromptBuilder.buildUserLines(
+          conversation: conversation,
+          currentMemory: currentMemory,
+          lockedFields: lockedFields,
+        );
+
+  /// Drops the current conversation and starts a fresh one.
+  ///
+  /// Clears [_canonicalDialogue] and disposes the active chat session so the
+  /// next [generateChat] rebuilds from an empty history. The loaded [_model] is
+  /// deliberately kept — reloading it would cost seconds and generate heat,
+  /// which would contaminate the timing measurements this method exists to
+  /// support.
+  ///
+  /// Persisted memory is untouched; see `MemoryService.resetToColdStart`.
+  Future<void> startNewConversation() async {
+    return _runExclusive(() async {
+      final discarded = _canonicalDialogue.length;
+      _canonicalDialogue.clear();
+      _systemFingerprint = null;
+
+      final chat = _chat;
+      _chat = null;
+      if (chat != null) {
+        try {
+          await chat.session.close();
+        } catch (e) {
+          debugPrint('LlmService.startNewConversation: session close failed: $e');
+        }
+      }
+
+      debugPrint(
+        'LlmService.startNewConversation: cleared $discarded message(s), '
+        'model kept loaded',
+      );
+    });
+  }
 
   Future<void> close() async {
     return _runExclusive(() async {
@@ -701,3 +1053,126 @@ class LlmService {
 }
 
 enum _GenerationStage { preparing, queryAccepted, generating }
+
+/// Per-turn measurements captured during [LlmService.generateChat].
+///
+/// Supplies the timing and prompt columns of protocol section 1b.
+class ChatGenerationTelemetry {
+  const ChatGenerationTelemetry({
+    required this.replyStartMs,
+    required this.replyEndMs,
+    required this.ttftMs,
+    required this.sysPromptChars,
+    required this.sysPromptSha256,
+    required this.sessionRebuilt,
+    required this.replayedMessageCount,
+    this.toolsExposed = const <String>[],
+    this.toolCalls = const <String>[],
+  });
+
+  final int replyStartMs;
+  final int replyEndMs;
+
+  /// Submit to first token. Null when the model produced no chunk — for
+  /// example a turn answered entirely from a tool result.
+  final int? ttftMs;
+
+  /// Length of the composed prompt: memory block plus the tool blocks.
+  final int sysPromptChars;
+  final String sysPromptSha256;
+
+  /// The chat session was torn down and rebuilt for this turn, discarding the
+  /// KV cache. Happens on the turn after memory changes.
+  final bool sessionRebuilt;
+
+  /// Messages replayed into the rebuilt session; 0 when no rebuild happened.
+  final int replayedMessageCount;
+
+  /// Names of the tools actually written into `<tools>` on this turn.
+  ///
+  /// Two things need this. Protocol §5.8 step 4 asks the RA to confirm the
+  /// memory-update tools were *not* exposed while the consent flag is off,
+  /// and there was previously no way to check that from the log.
+  ///
+  /// And `create_calendar_event` is registered only when the Google gateway
+  /// reports available (`tool_registry.dart:165`), so it silently adds 1,040
+  /// characters to the prompt when signed in. A sign-in that lapses mid-block
+  /// shrinks the prompt, changes `sys_prompt_sha256` and forces a session
+  /// rebuild. This column is how that gets caught rather than inferred from a
+  /// jump in `sys_prompt_chars`.
+  final List<String> toolsExposed;
+
+  /// The tools the model actually called, and how each one ended, as
+  /// `name:ok` or `name:<errorCode>`. Empty when it called nothing.
+  ///
+  /// [toolsExposed] answers what was on offer; this answers what was used.
+  /// Without it a reply claiming a memory write is indistinguishable from one
+  /// backed by a refused call, which is the open half of T-25.
+  final List<String> toolCalls;
+
+  int get totalMs => replyEndMs - replyStartMs;
+}
+
+/// Thrown when the extraction pass exceeds its generation budget.
+///
+/// Exists so the caller can record `TIMED_OUT` rather than treating the empty
+/// result as "nothing to change" — the two used to be indistinguishable.
+class MemoryExtractionTimeoutException implements Exception {
+  const MemoryExtractionTimeoutException(this.budget);
+
+  final Duration budget;
+
+  @override
+  String toString() =>
+      'Memory extraction exceeded ${budget.inSeconds}s and was abandoned.';
+}
+
+/// Thrown when an extraction pass is cut off rather than allowed to finish.
+///
+/// Distinct from [MemoryExtractionTimeoutException] because the two describe
+/// different faults: a timeout is a pass that stalled, this is one that was
+/// producing output steadily and producing rubbish. Recorded as `ABORTED`.
+class MemoryExtractionAbortedException implements Exception {
+  const MemoryExtractionAbortedException(
+    this.reason,
+    this.elapsed,
+    this.chars,
+  );
+
+  /// `repetition`, `deadline` or `char-limit`.
+  final String reason;
+  final Duration elapsed;
+  final int chars;
+
+  @override
+  String toString() =>
+      'Memory extraction was stopped after ${elapsed.inMilliseconds}ms and '
+      '$chars characters: $reason.';
+}
+
+/// Outcome of one extraction pass, for the write-path columns of section 1b.
+class MemoryExtractionOutcome {
+  const MemoryExtractionOutcome({
+    required this.parseResult,
+    this.rawOutput,
+    this.memoryChanged = false,
+    this.layersChanged = const <String>[],
+    this.rejectionCodes = const <String>[],
+  });
+
+  const MemoryExtractionOutcome.notRun()
+    : parseResult = ExtractionParseResult.notRun,
+      rawOutput = null,
+      memoryChanged = false,
+      layersChanged = const <String>[],
+      rejectionCodes = const <String>[];
+
+  final ExtractionParseResult parseResult;
+
+  /// Raw model output, kept whenever the pass did not cleanly apply a patch.
+  final String? rawOutput;
+
+  final bool memoryChanged;
+  final List<String> layersChanged;
+  final List<String> rejectionCodes;
+}

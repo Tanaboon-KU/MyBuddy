@@ -22,8 +22,17 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final notificationService = NotificationService();
-  await notificationService.initialize();
-  await notificationService.onAppOpened();
+  // Notifications are a convenience, not a prerequisite for the app running.
+  // An unguarded await here meant any failure — a missing platform settings
+  // object, a timezone lookup error, a denied permission — aborted main()
+  // before runApp() and the user got no window at all, with the reason only
+  // visible in the debug console.
+  try {
+    await notificationService.initialize();
+    await notificationService.onAppOpened();
+  } catch (e, st) {
+    debugPrint('Notification setup failed, continuing without it: $e\n$st');
+  }
 
   runApp(
     ProviderScope(
