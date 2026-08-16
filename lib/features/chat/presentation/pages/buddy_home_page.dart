@@ -11,6 +11,7 @@ import '../../../../core/audio/audio_recorder_service.dart';
 import '../../../../core/tts/tts_service.dart';
 import '../../../../core/unity/unity_bridge.dart';
 import '../../../../shared/widgets/glass/glass.dart';
+import '../../../diagnostics/experiment_tools_access.dart';
 import '../../../diagnostics/presentation/widgets/experiment_tools_sheet.dart';
 import '../../../google_calendar/presentation/pages/google_calendar_page.dart';
 import '../../../settings/presentation/pages/settings_page.dart';
@@ -232,11 +233,15 @@ class _BuddyHomePageState extends ConsumerState<BuddyHomePage> {
             icon: Icons.add_comment_outlined,
             onPressed: _startNewConversation,
           ),
-          GlassIconButton.pill(
-            tooltip: 'Experiment tools',
-            icon: Icons.science_outlined,
-            onPressed: _openExperimentTools,
-          ),
+          // Debug builds only, unless a build asks for it by name. The sheet
+          // behind this resets memory, seeds the profile and dumps the
+          // conversation to disk - see ExperimentToolsAccess.
+          if (ExperimentToolsAccess.current)
+            GlassIconButton.pill(
+              tooltip: 'Experiment tools',
+              icon: Icons.science_outlined,
+              onPressed: _openExperimentTools,
+            ),
           GlassIconButton.pill(
             tooltip: 'Memory',
             icon: Icons.psychology_rounded,
