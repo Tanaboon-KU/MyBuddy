@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/diagnostics/battery_status_service.dart';
 import '../core/diagnostics/turn_log.dart';
 import '../core/diagnostics/turn_log_recorder.dart';
+import '../core/llm/llm_backend_choice.dart';
 import '../core/llm/llm_service.dart';
 import '../core/memory/extraction_arm.dart';
 import '../core/memory/memory_service.dart';
@@ -519,8 +520,16 @@ class AppController extends AssistantRuntimeController {
     // nothing marked the end of the read path, so "has the reply finished?"
     // could only be answered by watching the screen. E1-nowait needs the answer
     // the instant it changes.
+    // Both build-time choices, on one grep-able line each, because a block has
+    // to read its own configuration off the handset rather than assume the APK
+    // it meant to install is the one running. LLM_BACKEND joined this on
+    // 2026-08-18: it decides whether inference goes through libCB.so, which is
+    // where an Adreno driver fault killed a block mid-run.
     debugPrint(
       'EXTRACTION_ARM ${_arm.label}',
+    );
+    debugPrint(
+      'LLM_BACKEND ${LlmBackendChoice.fromEnvironment().label}',
     );
     debugPrint(
       'TURN_RECORDED session=$_sessionId turn=$turnIndex '

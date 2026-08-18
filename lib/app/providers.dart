@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/legacy.dart';
 import '../core/diagnostics/experiment_dump_service.dart';
 import '../core/google/google_auth_service.dart';
 import '../core/google/google_calendar_service.dart';
+import '../core/llm/llm_backend_choice.dart';
 import '../core/llm/llm_platform.dart';
 import '../core/llm/llm_service.dart';
 import '../core/memory/memory_service.dart';
@@ -68,6 +69,9 @@ final llmServiceProvider = Provider<LlmService>((ref) {
 
   return LlmService(
     platform: platform,
+    // Build-time, and GPU unless a build asks otherwise - see
+    // LlmBackendChoice for the driver fault that made this a flag.
+    preferredBackend: LlmBackendChoice.fromEnvironment().backend,
     unityBridge: unityBridge,
     memoryService: memoryService,
     calendarEventGateway: () => ref.read(googleCalendarServiceProvider),
